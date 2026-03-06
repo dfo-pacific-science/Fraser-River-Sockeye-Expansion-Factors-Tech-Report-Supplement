@@ -1,0 +1,715 @@
+---
+title: "01-01-Mean-of-Ratios"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+From the 2019 Calibration Report (Welch and Leaf 2019):
+contingent on the criteria that escapements to individual streams would only be 
+reassessed if they fell within a stream size/water clarity/assessment method 
+strata having either a minimum of five data points with an error (CV) of 25% or 
+less or having a total of 10 or more data points. 
+
+*Major Difference between 01-02 and 01-01 is that 01-02 is in log-space
+*01-01 is in un-transformed space.
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(patchwork) # for multi plot ggplot graphs
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+## Data
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+```
+
+## Specifications FILE
+```{r}
+modout <- "./r_objects/models/model_specifications.rds"
+spec.out <- readRDS(modout)
+```
+
+## Base Plots
+https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+```{r colour pallet}
+cal$size <- factor(cal$size, levels=c("Small", "Medium", "Large", "X-Large"), ordered=T)
+
+size.cols = c("#D55E00", # V. Small
+              "#56B4E9", # Medium (including the smalls)
+              "#E69F00", # Large
+              "#CC79A7") # X-Large
+```
+
+#1 Ratios
+## Water Clarity
+Only considering Method-Size-Clarity combinations of > 20 n
+```{r}
+cal.keep <- count(cal,
+                  lpe_method, size, water_clarity)
+```
+```{r}
+cal.ratios <- cal %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method, size, water_clarity) %>%
+  summarise(n = n(), # sample size
+            Average.Pop = mean(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR,
+            q75 = quantile(hpe/lpe, 0.75),
+            q25 = quantile(hpe/lpe, 0.25)) %>% 
+  # needed to calculated interquartile range
+  mutate(iqr = q75-q25,
+         iqr.5 = iqr*1.5, # for calculating outliers
+         q75.5 = round2(q75+iqr.5, 2), # whisker max
+         q25.5 = round2(q25-iqr.5, 2), # whisker min
+         # creating flag of when to use MoR
+          useable.MoR = case_when(
+    n > 20 & MoR.CV <= 0.50 ~ "Yes",
+    TRUE ~ "No"
+    ))
+
+# filtering based on MoR selection criteria
+cal.ratios.keep <- filter(cal.ratios,
+                          useable.MoR == "Yes")
+```
+
+## Table Outputs
+```{r}
+table01 <- cal.ratios %>% 
+  dplyr::select(lpe_method:MoR.CV) %>% 
+  mutate(Average.Pop = round2(Average.Pop, 0),
+         MoR = round2(MoR, 2),
+         MoR.Min = round2(MoR.Min, 2),
+         MoR.Max = round2(MoR.Max, 2),
+         MoR.SD = round2(MoR.SD, 2),
+         MoR.CV = round2(MoR.CV, 3)*100)
+
+write.csv(table01, "./tables/01_01-Mean-of-Ratios-summary.csv")
+
+outliers <- cal %>% 
+  left_join(.,
+            dplyr::select(cal.ratios,
+                          lpe_method:water_clarity, q75.5, q25.5)) %>% 
+  dplyr::select(sid:water_clarity, lpe_method, hpe, lpe, q75.5, q25.5) %>% 
+  mutate(ratio = round2(hpe/lpe, 2),
+    outlier = case_when(
+    ratio < q25.5 ~ "Outlier",
+    ratio > q75.5 ~ "Outlier",
+    TRUE ~ NA
+  )) %>% 
+  filter(outlier == "Outlier")
+```
+
+
+### Figure of Ratios by Clarity and Method
+```{r}
+f1 <- cal %>% 
+  ggplot(aes(x = size, y = hpe/lpe, fill = size, colour = water_clarity)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_boxplot() +
+  scale_fill_manual(values = size.cols) +
+  scale_colour_manual(values = c("gray","black")) +
+  facet_wrap(~lpe_method) +
+  labs(y = "High Accuracy / Peak Count") +
+  geom_text(data = cal.keep,
+            aes(x = size, y = 16,
+                 label = n), 
+            position = position_dodge(width = 0.75)) 
+f1
+ggsave("./figures/Clarity_Size_Method_Ratios.png",
+       plot = f1, height = 4.5, width = 10, dpi = 150)
+
+ggsave("./figures/Clarity_Size_Method_Ratios.png",
+       plot = f1, height = 7, width = 8, dpi = 150)
+```
+
+## Substrate
+### Filterting
+Only considering Method-Size-Substrate combinations of > 20 n
+```{r}
+cal$substrate_shade <- factor(cal$substrate_shade, levels=c("Light", "Medium", "Dark"), ordered=T)
+
+cal.keep.sub <- count(cal,
+                  lpe_method, size, substrate_shade)
+```
+
+```{r}
+f2 <- cal %>% 
+  ggplot(aes(x = size, y = hpe/lpe, fill = size, colour = substrate_shade)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_boxplot() +
+  scale_fill_manual(values = size.cols) +
+  scale_colour_manual(values = c("grey", "gray25", "black")) +
+  facet_wrap(~lpe_method) +
+  labs(y = "High Accuracy / Peak Count") +
+  geom_text(data = cal.keep.sub,
+            aes(x = size, y = 16,
+                 label = n), 
+            position = position_dodge(width = 0.75)) 
+
+#ggsave("./figures/Substrate_Size_Method_Ratios.png",
+#       plot = f2, height = 8, width = 10, dpi = 150)
+```
+
+Deciding not to run any substrate specific MoR models.
+
+## Leave One Out
+This is leave one out model fitting for each of MoR, RoM, and LM MoR
+```{r}
+# dataframe to fill with results.
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric()) 
+```
+
+```{r}
+# saving each model type for later steps
+saveRDS(cal.ratios.keep, file = "./r_objects/models/MoR_Clarity_Model.rds")
+#saveRDS(cal.ratios.keep, file = "./r_objects/models/RoM_Clarity_Model.rds")
+#saveRDS(rom.lm, file = "./r_objects/models/MoR_LM_Clarity_Model.rds")
+
+# all models have no transformations, so just making a generic MoR_RoM shared specifications file
+specifications_out <- data.frame(model = c("MoR_Clarity_Models"),
+                                 target = c(NA),
+                                 order = c(NA),
+                                 type = c(NA),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "MoR_Clarity_Models") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+
+system - method - model
+mor_clarity
+```{r}
+# creating a data frame that only contains data points part of MoR useable = Yes clarity_size sets
+ratio.test.set <- left_join(cal, 
+                            dplyr::select(cal.ratios.keep,
+                                          lpe_method, size, water_clarity, useable.MoR)) %>% 
+  filter(useable.MoR == "Yes")
+
+for(i in 1:nrow(cal.ratios.keep)){ # for each method-size-clarity set with MoR = Yes
+  loop.method <- cal.ratios.keep$lpe_method[i]
+  loop.size <- cal.ratios.keep$size[i]
+  loop.clarity <- cal.ratios.keep$water_clarity[i]
+  
+  loop.dat = filter(ratio.test.set,
+                      lpe_method == loop.method,
+                      size == loop.size,
+                      water_clarity == loop.clarity)
+  
+            # only run the ratios for samples greater than 5
+    if(nrow(loop.dat)>5){
+      for(l in 1:nrow(loop.dat)){
+        temp.dat <- loop.dat[-l, ]
+        temp.usid <- loop.dat$usid[l]
+      
+        # create the MoR from the temporary loop data set
+          loop.fit <- temp.dat %>% 
+            group_by(lpe_method, size, water_clarity) %>%
+            summarise(MoR = mean(hpe/lpe),
+                    MoR.SD = sd(hpe/lpe))
+          
+          # estimate fit and error and bind it to the output (model.test) for MoR
+           model.test <- rbind(model.test,
+                        data.frame(model = paste(loop.size, loop.method, 
+                                                 loop.clarity, "MoR_Clarity_Model", sep = "_"),
+                                   usid = loop.dat$usid[l],
+                                   fit = loop.fit$MoR*loop.dat$lpe[l],
+                                   # var(fit) = lpe^2 * var(MoR) = lpe^2 * SD^2 = lpe * SD
+                                   se.fit = loop.fit$MoR.SD*loop.dat$lpe[l],
+                                   calibrated.estimate = loop.fit$MoR*loop.dat$lpe[l]))
+      } # l of each datapoint
+    } # if > 5
+} # end of i loop for cal.ratio set
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 4)
+
+```
+### Plots
+```{r box and whisker of percent error by system}
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error,
+             fill = model)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(position = "jitter", alpha = 0.5,
+             aes(colour = model)) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  coord_flip() +
+  labs(title = "All Data Model Performance",
+       y = "Absolute percent error", x = "Streams")
+```
+
+#### Save Model Ranks
+```{r}
+count(model.rank, model)
+
+MoR_Clarity_ranks <- model.rank %>% 
+  filter(grepl("MoR_Clarity", model))
+
+saveRDS(MoR_Clarity_ranks, "r_objects/01_Model_Ranks_from_MoR_Clarity_Model.rds")
+```
+
+# 2 Early Stuart
+```{r}
+cal.ratios <- cal %>% 
+  filter(run_timing_group == "Early Stuart") %>% 
+  # creating ratios by strea
+  group_by(lpe_method, gazetted_stream_name) %>%
+  summarise(n = n(), # sample size
+            Average.Pop = mean(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR,
+            q75 = quantile(hpe/lpe, 0.75),
+            q25 = quantile(hpe/lpe, 0.25)) %>% 
+  # needed to calculated interquartile range
+  mutate(iqr = q75-q25,
+         iqr.5 = iqr*1.5, # for calculating outliers
+         q75.5 = q75+iqr.5, # whisker max
+         q25.5 = q25-iqr.5  # whisker min
+         ) %>% 
+  filter(n > 10)
+
+# total ESTU average with just 3 streams
+cal.ratios.estu <- cal %>% 
+  # just based off of the three main streams
+  filter(gazetted_stream_name %in% cal.ratios$gazetted_stream_name) %>% 
+  group_by(lpe_method) %>% 
+  summarise(n = n(), # sample size
+            Average.Pop = mean(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR,
+            q75 = quantile(hpe/lpe, 0.75),
+            q25 = quantile(hpe/lpe, 0.25)) %>% 
+  # needed to calculated interquartile range
+  mutate(iqr = q75-q25,
+         iqr.5 = iqr*1.5, # for calculating outliers
+         q75.5 = q75+iqr.5, # whisker max
+         q25.5 = q25-iqr.5,  # whisker min
+         gazetted_stream_name = "Forfar, Gluske, O'Ne-Ell")
+
+# total ESTU average with all clear data
+cal.ratios.estu.all <- cal %>% 
+  # just based off of the three main streams
+  filter(run_timing_group == "Early Stuart", water_clarity == "Clear") %>% 
+  group_by(lpe_method) %>% 
+  summarise(n = n(), # sample size
+            Average.Pop = mean(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR,
+            q75 = quantile(hpe/lpe, 0.75),
+            q25 = quantile(hpe/lpe, 0.25)) %>% 
+  # needed to calculated interquartile range
+  mutate(iqr = q75-q25,
+         iqr.5 = iqr*1.5, # for calculating outliers
+         q75.5 = q75+iqr.5, # whisker max
+         q25.5 = q25-iqr.5,  # whisker min
+         gazetted_stream_name = "All Early Stuart")
+```
+
+## Table Outputs
+```{r}
+table02 <- cal.ratios %>% 
+  rbind(., cal.ratios.estu, cal.ratios.estu.all) %>% # add on the Estu Average
+  dplyr::select(lpe_method:MoR.CV) %>% 
+  mutate(Average.Pop = round2(Average.Pop, 0),
+         MoR = round2(MoR, 2),
+         MoR.Min = round2(MoR.Min, 2),
+         MoR.Max = round2(MoR.Max, 2),
+         MoR.SD = round2(MoR.SD, 2),
+         MoR.CV = round2(MoR.CV, 3)*100)
+
+write.csv(table02, "./tables/01_01-Mean-of-Ratios-summary-Early-Stuart.csv")
+```
+
+## Leave One Out
+This is leave one out model fitting for each of MoR, RoM, and LM MoR
+```{r}
+# dataframe to fill with results.
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric()) 
+```
+
+
+```{r}
+# saving each model type for later steps
+saveRDS(cal.ratios, file = "./r_objects/models/MoR_ESTU_Single_Model.rds")
+#saveRDS(cal.ratios.keep, file = "./r_objects/models/RoM_Clarity_Model.rds")
+#saveRDS(rom.lm, file = "./r_objects/models/MoR_LM_Clarity_Model.rds")
+
+# all models have no transformations, so just making a generic MoR_RoM shared specifications file
+specifications_out <- data.frame(model = c("MoR_ESTU_Single_Model"),
+                                 target = c(NA),
+                                 order = c(NA),
+                                 type = c(NA),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "MoR_ESTU_Single_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+for(i in 1:nrow(cal.ratios)){ # for each method-size-clarity set with MoR = Yes
+  loop.system <- cal.ratios$gazetted_stream_name[i]
+  
+  loop.dat = filter(ratio.test.set,
+                      gazetted_stream_name == loop.system)
+  
+            # only run the ratios for samples greater than 5
+    if(nrow(loop.dat)>5){
+      for(l in 1:nrow(loop.dat)){
+        temp.dat <- loop.dat[-l, ]
+        temp.usid <- loop.dat$usid[l]
+      
+        # create the MoR from the temporary loop data set
+          loop.fit <- temp.dat %>% 
+            group_by(lpe_method, gazetted_stream_name) %>%
+            summarise(MoR = mean(hpe/lpe),
+                    MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)))
+          
+          # estimate fit and error and bind it to the output (model.test) for MoR
+           model.test <- rbind(model.test,
+                        data.frame(model = paste(loop.system, "MoR_ESTU_Single_Model", sep = "_"),
+                                   usid = loop.dat$usid[l],
+                                   fit = loop.fit$MoR*loop.dat$lpe[l],
+                                   # var(fit) = lpe^2 * var(MoR) = lpe^2 * SD^2 = lpe * SD
+                                   se.fit = loop.fit$MoR.SD*loop.dat$lpe[l],
+                                   calibrated.estimate = loop.fit$MoR*loop.dat$lpe[l]))
+      } # l of each datapoint
+    } # if > 5
+} # end of i loop for cal.ratio set
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 5)
+
+```
+
+```{r box and whisker of percent error by system}
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error,
+             fill = model)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(position = "jitter", alpha = 0.5,
+             aes(colour = model)) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  coord_flip() +
+  labs(title = "All Data Model Performance",
+       y = "Absolute percent error", x = "Streams")
+```
+
+#### Save Model Ranks
+```{r}
+count(model.rank, model)
+
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_MoR_ESTU_Single_Model.rds")
+```
+
+# 3 Extra - Low Abundance Ratios
+```{r}
+cal.ratios.all <- cal %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method, size = "All", water_clarity) %>%
+  summarise(n = n(), # sample size
+            min.pop = min(hpe),
+            Average.Pop = mean(hpe),
+            max.pop = max(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR)
+
+cal.ratios.25 <- cal %>% 
+  filter(lpe < 25000) %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method, size = "< 25k", water_clarity) %>%
+  summarise(n = n(), # sample size
+            min.pop = min(hpe),
+            Average.Pop = mean(hpe),
+            max.pop = max(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR)
+
+cal.ratios.25.sm <- cal %>% 
+  filter(lpe < 25000,
+         size %in% c("Small", "Medium")) %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method, size = "< 25k SM", water_clarity) %>%
+  summarise(n = n(), # sample size
+            min.pop = min(hpe),
+            Average.Pop = mean(hpe),
+            max.pop = max(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR)
+
+cal.ratios.10.sm <- cal %>% 
+  filter(lpe < 10000,
+         size %in% c("Small", "Medium")) %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method, size = "< 10k SM", water_clarity) %>%
+  summarise(n = n(), # sample size
+            min.pop = min(hpe),
+            Average.Pop = mean(hpe),
+            max.pop = max(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR)
+
+cal.ratios3 <- rbind(cal.ratios.all,
+                     cal.ratios.25,
+                     cal.ratios.25.sm,
+                     cal.ratios.10.sm)
+```
+
+## Table Outputs
+```{r}
+table.extra <- cal.ratios3 %>% 
+  mutate(min.pop = round2(min.pop, 0),
+         Average.Pop = round2(Average.Pop, 0),
+         max.pop = round2(max.pop, 0),
+         MoR = round2(MoR, 2),
+         MoR.Min = round2(MoR.Min, 2),
+         MoR.Max = round2(MoR.Max, 2),
+         MoR.SD = round2(MoR.SD, 2),
+         MoR.CV = round2(MoR.CV, 3)*100)
+
+write.csv(table.extra, "./tables/01_01-Mean-of-Ratios-Small-Abundance-Extra-summary.csv")
+```
+
+## Save Low Abundance MoR Models
+```{r}
+# saving each model type for later steps
+saveRDS(cal.ratios.25.sm, file = "./r_objects/models/MoR_Low_Abundance_Models.rds")
+
+# all models have no transformations, so just making a generic MoR_RoM shared specifications file
+specifications_out <- data.frame(model = c("MoR_Low_Abundance_Models"),
+                                 target = c(NA),
+                                 order = c(NA),
+                                 type = c(NA),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "MoR_Low_Abundance_Models") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+## Leave One Out
+This is leave one out model fitting for each of MoR, RoM, and LM MoR
+```{r}
+# dataframe to fill with results.
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric()) 
+```
+
+```{r}
+# creating a data frame that only contains data points part of MoR useable = Yes clarity_size sets
+loop.dat <- cal %>% 
+  filter(lpe < 25000,
+         size %in% c("Small", "Medium"))
+
+    for(l in 1:nrow(loop.dat)){
+      temp.clarity <- loop.dat$water_clarity[l]
+      temp.method <- loop.dat$lpe_method[l]
+        temp.dat <- loop.dat[-l, ] %>% 
+          filter(water_clarity == temp.clarity,
+                 lpe_method == temp.method)
+        temp.usid <- loop.dat$usid[l]
+      
+        # create the MoR from the temporary loop data set
+          loop.fit <- temp.dat %>% 
+            summarise(MoR = mean(hpe/lpe),
+                    MoR.SD = sd(hpe/lpe))
+          
+          # estimate fit and error and bind it to the output (model.test) for MoR
+           model.test <- rbind(model.test,
+                        data.frame(model = "MoR_Low_Abundance_Models",
+                                   usid = loop.dat$usid[l],
+                                   fit = loop.fit$MoR*loop.dat$lpe[l],
+                                   # var(fit) = lpe^2 * var(MoR) = lpe^2 * SD^2 = lpe * SD
+                                   se.fit = loop.fit$MoR.SD*loop.dat$lpe[l],
+                                   calibrated.estimate = loop.fit$MoR*loop.dat$lpe[l]))
+      } # l of each datapoint
+```
+
+```{r}
+  model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 4.1)
+
+```
+
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_MoR_Low_Abundance_Models.rds")
+```
+
+# 4 Harrison
+```{r}
+cal.ratios.25 <- cal %>% 
+  filter(gazetted_stream_name == "Harrison River") %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method, water_clarity) %>%
+  summarise(n = n(), # sample size
+            min.pop = min(hpe),
+            Average.Pop = mean(hpe),
+            max.pop = max(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR)
+
+cal.harrison <- cal %>% 
+  filter(gazetted_stream_name == "Harrison River") %>% 
+  # creating ratios by size and water clarity
+  group_by(lpe_method) %>%
+  summarise(n = n(), # sample size
+            min.pop = min(hpe),
+            Average.Pop = mean(hpe),
+            max.pop = max(hpe),
+            MoR = mean(hpe/lpe), # MoR = Mean of Ratios
+            MoR.Min = min(hpe/lpe),
+            MoR.Max = max(hpe/lpe),
+            MoR.SD = sqrt(var(hpe/lpe) + mean((hpe_error^2)*(1/lpe)^2)), # Table 3 in McPherson et al. 2000 https://www.arlis.org/docs/vol1/ADFG/FMS/FMS00-02.pdf
+            MoR.CV = MoR.SD/MoR)
+```
+
+## Leave One Out
+This is leave one out model fitting for each of MoR, RoM, and LM MoR
+```{r}
+# dataframe to fill with results.
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric()) 
+```
+
+```{r}
+# saving each model type for later steps
+saveRDS(cal.harrison, file = "./r_objects/models/MoR_Harrison_Model.rds")
+
+# all models have no transformations, so just making a generic MoR_RoM shared specifications file
+specifications_out <- data.frame(model = c("MoR_Harrison_Models"),
+                                 target = c(NA),
+                                 order = c(NA),
+                                 type = c(NA),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "MoR_Harrison_Models") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+# creating a data frame that only contains data points part of MoR useable = Yes clarity_size sets
+loop.dat <- cal %>% 
+  filter(gazetted_stream_name == "Harrison River")
+
+    for(l in 1:nrow(loop.dat)){
+        temp.dat <- loop.dat[-l, ]
+        temp.usid <- loop.dat$usid[l]
+      
+        # create the MoR from the temporary loop data set
+          loop.fit <- temp.dat %>% 
+            group_by(lpe_method) %>%
+            summarise(MoR = mean(hpe/lpe),
+                    MoR.SD = sd(hpe/lpe))
+          
+          # estimate fit and error and bind it to the output (model.test) for MoR
+           model.test <- rbind(model.test,
+                        data.frame(model = "MoR_Harrison_Models",
+                                   usid = loop.dat$usid[l],
+                                   fit = loop.fit$MoR*loop.dat$lpe[l],
+                                   # var(fit) = lpe^2 * var(MoR) = lpe^2 * SD^2 = lpe * SD
+                                   se.fit = loop.fit$MoR.SD*loop.dat$lpe[l],
+                                   calibrated.estimate = loop.fit$MoR*loop.dat$lpe[l]))
+      } # l of each datapoint
+```
+
+```{r}
+  model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 5)
+
+```
+
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_MoR_Harrison_Model.rds")
+```
+

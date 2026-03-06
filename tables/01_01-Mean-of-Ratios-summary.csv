@@ -1,0 +1,13 @@
+"","lpe_method","size","water_clarity","n","Average.Pop","MoR","MoR.Min","MoR.Max","MoR.SD","MoR.CV"
+"1","Aerial","Small","Clear",1,81169,3.58,3.58,3.58,NA,NA
+"2","Aerial","Medium","Clear",25,87586,2.31,0.99,3.78,0.72,31.2
+"3","Aerial","Medium","Pt_Turb_Tannic",13,74792,3.55,1.4,7.57,1.65,46.6
+"4","Aerial","Large","Clear",3,182364,7.06,3.28,9.97,3.49,49.4
+"5","Aerial","X-Large","Clear",10,121683,7.1,2.38,15.83,4.89,68.8
+"6","Aerial","X-Large","Pt_Turb_Tannic",17,164673,3.81,1.5,10.51,2.69,70.6
+"7","Ground","Small","Clear",56,8363,1.7,1.07,2.59,0.36,21
+"8","Ground","Small","Pt_Turb_Tannic",2,12710,2.67,2.06,3.28,0.86,32.4
+"9","Ground","Medium","Clear",25,94483,1.99,1.11,4.2,0.71,35.5
+"10","Ground","Medium","Pt_Turb_Tannic",2,35306,2.42,2.17,2.67,0.74,30.4
+"11","Ground","Large","Clear",7,354543,3.62,2.17,7.57,1.98,54.6
+"12","Ground","X-Large","Clear",1,127386,2.4,2.4,2.4,NA,NA

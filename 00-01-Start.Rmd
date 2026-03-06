@@ -1,0 +1,187 @@
+---
+title: "00-01-Start"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+Welcome to the Fraser River and Interior Area Sockeye Calibration Report Code.
+This code was written for the Technical Document, "Assessment and redevelopment of visual survey expansion factors and a summary of current interpolation methods for Fraser River Sockeye (Oncorhynchus nerka) spawner estimates."
+
+The code is separated into 5 main sections.
+- 00 Series are the introduction and functions that are referenced in later
+sections.
+- 01 Series are model development and running of the leave-one-out cross-
+validations.
+- 02 Calculates the model performance metrics for each set-level, resulting in
+rank-sets.
+- 03 Series applies the calibration algorithm to the training data and compares it to 
+the default 1.8 expansion factor.
+- 04 Is the calibration application "tool" and test application to the 2024 
+data.
+
+If you are running the code for the very first time, this mark-down must be run
+because it initiates a file that is then populated throughout the 01 series.
+
+Otherwise, this Start file is primarily to show some simple visualizations of
+the data.
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(scales) # scale_x_continuous
+library(patchwork) # for multi plot ggplot graphs
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+## Data
+This is the paired calibration database.
+There is an excel version in the data folder with a readme tab that defines
+the fields.
+```{r}
+cal <- readRDS(file = "r_objects/sockeye_calibration_data.rds")
+glimpse(cal)
+```
+
+## Dataframe for Model Specs for Later
+This dataframe will be populated during the 01 series with model specs
+It is later referenced in 03-01-Model-Code to create a function that 
+automatically applies model specific transformations.
+```{r}
+modout <- "./r_objects/models/model_specifications.rds"
+
+specifications_out <- data.frame(model = c(""),
+                                 target = c(""),
+                                 order = c(0),
+                                 type = c(""),
+                                 transform = c(0))
+
+saveRDS(specifications_out, file = modout)
+```
+
+# Summaries
+The following are a few quick summaries used for tables in the report
+
+## Samples Per Year
+```{r}
+sample.systems <- cal %>% 
+  group_by(CU, gazetted_stream_name) %>% 
+  summarize(n = n(),
+            earliest = min(year),
+            recent = max(year))
+
+write.csv(sample.systems, file="./tables/00-Sample Size Summary Table - CUs and Systems.csv", row.names = F)
+
+```
+
+## Visual Count Ranges
+```{r}
+data.range <- cal %>% 
+  group_by(size, water_clarity, lpe_method, substrate_shade) %>% 
+  summarise(n = n(),
+            median = median(lpe),
+            min = min(lpe),
+            max = max(lpe)) %>% 
+  mutate_at(c(6:8), ~ round2(., 0))
+
+write.csv(data.range, "./tables/00-Regression_LPE_Ranges_Full.csv", row.names = F)
+saveRDS(data.range, "./r_objects/00-Regression_LPE_Ranges_FUll.rds")
+
+data.range2 <- cal %>% 
+  group_by(size, water_clarity, lpe_method) %>% 
+  summarise(n = n(),
+            min10 = min(lpe)*0.9/10,
+            max10 = max(lpe)*1.1/10) %>% 
+  mutate_at(c(5:6), ~ round2(., 0)*10)
+
+write.csv(data.range2, "./tables/00-Regression_LPE_Ranges_Clarity_Method.csv", row.names = F)
+saveRDS(data.range2, "./r_objects/00-Regression_LPE_Ranges_Clarity_Method.rds")
+
+data.range3 <- cal %>% 
+  group_by(size, lpe_method) %>% 
+  summarise(n = n(),
+            min10 = min(lpe)*0.9/10,
+            max10 = max(lpe)*1.1/10) %>% 
+  mutate_at(c(4:5), ~ round2(., 0)*10)
+
+write.csv(data.range3, "./tables/00-Regression_LPE_Ranges.csv", row.names = F)
+saveRDS(data.range3, "./r_objects/00-Regression_LPE_Ranges.rds")
+```
+
+
+# Plots
+## Size Colours
+https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+```{r colour pallet}
+size.cols = c("#E69F00", # Large
+              "#56B4E9", # Medium (including the smalls)
+              "#D55E00", # Small
+              "#CC79A7") # X-Large
+```
+
+## HPE vs LPE By Size and Clarity
+```{r}
+plt.raw <- cal %>% 
+  ggplot(aes(x = lpe, y = hpe, colour = size)) +
+  geom_point() +
+  labs(x = "Visual Count", 
+       y = "High Accuracy Estimate") +
+  scale_colour_manual(values = size.cols)
+
+plt.log <- cal %>% 
+  ggplot(aes(x = lnlpe.sc, y = log(hpe), colour = size)) +
+  geom_point() +
+  labs(x = "ln(Scaled - Visual Count)", 
+       y = "ln(High Accuracy Estimate)") +
+  scale_colour_manual(values = size.cols)
+
+plt.raw + plt.log + plot_layout(guides = 'collect')
+
+ggsave("figures/SK Calibration - HPE vs LPE with Size as Colour.png",
+       units = "in", height = 4, width = 9, dpi = 150)
+```
+
+## Surveys through Time
+```{r}
+# By Conservation Unit
+cal %>% 
+  ggplot(aes(x = year, fill = CU)) +
+  geom_bar(stat = "count") +
+  scale_fill_manual(values = c("#000000","#004949","#009292","#ff6db6", "#ffb6db",
+                               "#490092","#006ddb","#b66dff","#6db6ff", "#b6dbff", 
+                               "#920000","#924900","#db6d00","#24ff24"))
+
+ggsave("figures/SK Calibration - Count by Year and CU.png",
+       units = "in", height = 5, width = 9, dpi = 96)
+
+# By Management Unit
+cal %>% 
+  ggplot(aes(x = year, fill = run_timing_group)) +
+  geom_bar(stat = "count") +
+  ggokabeito::scale_fill_okabe_ito(name = "Management Unit") +
+  labs(x = "Year", y = "Count of Paired Data")
+
+ggsave("figures/SK Calibration - Count by Year and MU.png",
+       units = "in", height = 5, width = 9, dpi = 96)
+```
+
+## Histogram by Size, Substrate & Clarity
+```{r}
+cal %>% 
+  ggplot(aes(lpe, fill = size)) +
+  geom_histogram() +
+  scale_fill_manual(values = size.cols,
+                      name = "Size") +
+  facet_grid(substrate_shade~water_clarity) +
+  geom_vline(xintercept = c(25000, 75000),
+             colour = "grey", lty = 2) +
+  scale_x_continuous(labels = label_comma()) +
+  labs(x = "Visual Count", y = "Count",
+       title = "Water Clarity by Substrate Shade and Size")
+
+ggsave("figures/SK Calibration - Count by Size Substrate Clarity.png",
+       units = "in", height = 6, width = 5.5, dpi = 96)
+```
+

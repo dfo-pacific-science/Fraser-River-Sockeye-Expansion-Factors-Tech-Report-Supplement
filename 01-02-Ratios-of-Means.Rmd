@@ -1,0 +1,340 @@
+---
+title: "01-02-Ratio-of-Means"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+```
+
+## Functions
+```{r}
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+## Data
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+```
+
+## Specifications FILE
+```{r}
+modout <- "./r_objects/models/model_specifications.rds"
+spec.out <- readRDS(modout)
+```
+
+#1d
+## Ratio-of-Means
+Based on prior methods, looking at ratio-of-means at different groupings.
+lpe_method first, then by size, then by substrate_shade.
+It is recommended to have 30+ samples per ratio. (Cochran 1977)
+Likely few combinations at that "fine detail" with 30 or even 20 + samples.
+
+It is also recommended that the CV of the mean X and Y is < 10% (Corchran 1977)
+I think this is only possible when the estimates are log transformed.
+
+Relationships are also not linear with normal distributions when in regular space
+Need to transform into log space for this method to work.
+
+rom = "ratio-of-means"
+```{r}
+count(cal, lpe_method, size, water_clarity) %>% 
+  mutate(rom = n >= 20)
+
+count(cal, lpe_method, size, substrate_shade) %>% 
+  mutate(rom = n >= 20)
+
+count(cal, lpe_method, size) %>% 
+  mutate(rom = n >= 20)
+
+count(cal, size) %>% 
+  mutate(rom = n >= 20)
+
+# showing that the CVs of the X and Y are > 10%
+sd(log(cal$hpe)) / mean(log(cal$hpe)) * 100
+sd((cal$hpe)) / mean((cal$hpe)) * 100 # super huge if not log transformed
+sd(log(cal$lpe)) / mean(log(cal$lpe)) * 100
+
+```
+
+Need to decide on Ratio-of-Mean groups.
+Most General = All Data
+Mid = Aggregate-Size and lpe_method
+Specialized = Size and lpe_method, only consider n>20
+WC = Water Clarity, Only Consider n>20
+
+```{r}
+cal <- cal %>% 
+  mutate(rom.gen = paste("All", lpe_method, sep = "."),
+         rom.agg = ifelse(size %in% c("Large", "X-Large"), "LXL", "SM"),
+         rom.agg = paste(rom.agg, lpe_method, sep = "."),
+         rom.size = paste(size, lpe_method, sep = "."),
+         rom.wc = paste(size, lpe_method, water_clarity, sep = "."))
+
+count(cal, rom.agg)
+count(cal, rom.size)
+count(cal, rom.wc)
+```
+
+```{r}
+# pivoting longer to get a more loop-able data set
+cal.long <- cal %>% 
+  dplyr::select(sid:water_clarity, lpe_method, hpe, lpe, hpe_error, rom.gen:rom.wc) %>% 
+  pivot_longer(
+    cols = starts_with("rom."),
+    names_to = "model",
+    values_to = "grouping")
+
+# Creating several additional subsets
+# no rom.gen both methods was made. need to make one
+cal.long.add <- cal.long %>% 
+  # make everything named the same
+  mutate(model = "rom.genB",
+         grouping = "All.Both") %>% 
+  # filtering to unique results in the OG cal data set
+  unique()
+
+# creating rom.estu single models - i.e. 1 ROM model per Estu System
+cal.estu.single <- cal.long %>% 
+  filter(gazetted_stream_name %in% c("O' Ne-Ell Creek",
+                                     "Gluske Creek",
+                                     "Forfar Creek")) %>% 
+  mutate(model = "rom.estu.single",
+         grouping = gazetted_stream_name) %>% 
+  # filtering to unique results in the OG cal data set
+  unique()
+  
+# creating rom.estu aggregate model - i.e. 1 ROM model for all of Estu
+cal.estu.all <- cal.long %>% 
+  filter(run_timing_group == "Early Stuart",
+         lpe_method == "Ground",
+         water_clarity == "Clear") %>% 
+  mutate(model = "rom.estu.all",
+         grouping = "Early Stuart") %>% 
+  # filtering to unique results in the OG cal data set
+  unique()
+
+## Add subsets to the list  
+# adding rom.gen to the rest of the model combinations
+cal.long <- rbind(cal.long.add, cal.long, cal.estu.single, cal.estu.all)
+
+model.sets <- cal.long %>% 
+  group_by(model, grouping) %>% 
+  summarise(average = mean(log(hpe))) %>% 
+  mutate(rom = NA, n = NA, var = NA, se = NA)
+
+for(i in 1:nrow(model.sets)){
+  temp.cal <- cal.long %>% 
+    filter(model == model.sets$model[i],
+           grouping == model.sets$grouping[i])
+  
+  m.temp <- temp.cal %>% 
+      summarise(ulow = mean(log(lpe)),
+                uhigh = mean(log(hpe)),
+                rom = mean(log(hpe))/mean(log(lpe)),
+                varhi = var(log(hpe)) + sum((hpe_error^2+1)/(hpe^2))/n()^2, # alternative or additional variance? essentially the sum of the transformed variances / the square of a multiplier, which is 1/n for a mean
+                # log variance is https://stats.stackexchange.com/questions/418313/variance-of-x-and-variance-of-logx-how-to-relate-them
+                varlo = var(log(lpe)),
+                covhilo = cov(log(hpe), log(lpe)),
+                n = n()) %>% 
+      mutate(var.fit = varhi / (ulow^2) + 
+      uhigh^2 * varlo / (ulow^4) -
+      2 * uhigh * covhilo / ulow^3 )
+  if(m.temp$n > 3){
+      model.sets$rom[i] <- m.temp$rom
+  model.sets$n[i] = m.temp$n
+  model.sets$var[i] = m.temp$var.fit
+  model.sets$se[i] = sqrt(m.temp$var.fit)
+  }
+}
+
+model.sets <- model.sets %>% 
+  filter(n > 3)
+```
+
+### Table of Outputs
+```{r}
+table01 <- model.sets %>% 
+  mutate(average = round2(average, 2),
+         rom = round2(rom, 3),
+         se = round2(se, 3), 
+         CV = round2(sqrt(exp(se^2)-1)*100, 1)) %>% 
+  dplyr::select(-var) %>% 
+  rename(Set = model, Expansion.Factor = rom, 
+         Sample.Size = n, Standard.Error = se) %>% 
+  arrange(Set, grouping) %>% 
+  mutate(Set = case_when(
+    Set == "rom.genB" ~ "Generalized (1)",
+    Set == "rom.gen" ~ "Generalized (1)",
+    Set == "rom.agg" ~ "Size-Aggregate (2)",
+    Set == "rom.size" ~ "Size (3)",
+    Set == "rom.wc" ~ "Size-Clarity (4)",
+    Set == "rom.estu.single" ~ "Individual (5)",
+    Set == "rom.estu.all" ~ "Specialized (6)"
+  ),
+  grouping = sub(pattern = "V. ", "", grouping),
+  grouping = sub(pattern = "LXL", "Large-X-Large", grouping),
+  grouping = sub(pattern = "SM", "Small-Medium", grouping)) %>% 
+  separate_wider_delim(
+    cols = grouping,
+    delim = ".",
+    names = c("Size", "Method", "Water.Clarity"),
+    too_few = "align_start"
+  ) %>% 
+  dplyr::select(Set:Water.Clarity,Expansion.Factor, Standard.Error,Sample.Size,average,CV); table01
+
+write.csv(table01, "./tables/01_02-Ratio-of-Means-summary.csv",
+          row.names = F)
+```
+
+Testing the expansion with or without a variance correction
+https://stats.stackexchange.com/questions/241187/calculating-standard-deviation-after-log-transformation
+```{r}
+cal.long <- cal.long %>% 
+  left_join(., model.sets) %>% 
+  filter(!is.na(rom)) %>% 
+  mutate(cal1 = exp(log(lpe)*rom),
+         cal2 = exp(log(lpe)*rom+var/2))
+
+cor(dplyr::select(cal.long, hpe, cal1, cal2))
+```
+
+```{r}
+model.sets <- filter(model.sets,
+                     n >= 13, # changed from 20 to 13 to inlcude O' Ne-Ell Creek
+                     model != "rom.estu.all") # removing estu.all because it is just too similar with the ROM_WC model
+saveRDS(filter(model.sets,
+               model == "rom.genB"), 
+               file = "./r_objects/models/All_ROM_GenB_Model.rds")
+saveRDS(filter(model.sets,
+               model == "rom.gen"), 
+               file = "./r_objects/models/All_ROM_Gen_Model.rds")
+saveRDS(filter(model.sets,
+               model == "rom.agg"), 
+               file = "./r_objects/models/All_ROM_Agg_Model.rds")
+saveRDS(filter(model.sets,
+               model == "rom.size"), 
+               file = "./r_objects/models/All_ROM_Size_Model.rds")
+saveRDS(filter(model.sets,
+               model == "rom.wc"), 
+               file = "./r_objects/models/All_ROM_WC_Model.rds")
+saveRDS(filter(model.sets,
+               model == "rom.estu.single"), 
+               file = "./r_objects/models/All_ROM_Estu_Model.rds")
+
+specifications_out <- data.frame(model = c("All_ROM_Model"),
+                                 target = c("lpe", "hpe"),
+                                 order = c(1, 1),
+                                 type = c("log", "log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "All_ROM_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+## Leave One Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate = numeric()) 
+```
+
+```{r}
+for(i in 1:nrow(model.sets)){
+  temp.cal <- cal.long %>% 
+    filter(model == model.sets$model[i],
+           grouping == model.sets$grouping[i])
+  
+  for(j in 1:nrow(temp.cal)){
+    
+    m.temp <- temp.cal[-j, ] %>% 
+      summarise(ulow = mean(log(lpe)),
+                uhigh = mean(log(hpe)),
+                rom = mean(log(hpe))/mean(log(lpe)),
+                rom = mean(log(hpe))/mean(log(lpe)),
+                varhi = var(log(hpe)),
+                varlo = var(log(lpe)),
+                covhilo = cov(log(hpe), log(lpe)),
+                n = n()) %>% 
+      mutate(var.fit = varhi / (ulow^2) + 
+      uhigh^2 * varlo / (ulow^4) -
+      2 * uhigh * covhilo / ulow^3 )
+    
+    p.temp <- data.frame(fit = log(temp.cal$lpe[j])*m.temp$rom, 
+                         se.fit = sqrt(m.temp$var.fit))
+    
+    model.test <- rbind(model.test, data.frame(model = model.sets$model[i],
+                                 usid = temp.cal$usid[j],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                        calibrated.estimate = exp(p.temp$fit)))
+  }
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = case_when(
+           model == "rom.genB" ~ 1,
+           model == "rom.gen" ~ 1,
+           model == "rom.agg" ~ 2,
+           model == "rom.size" ~ 3,
+           model == "rom.wc" ~ 4,
+           model == "rom.estu.single" ~ 5
+         ))
+```
+
+```{r box and whisker of percent error by system}
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error,
+             fill = model)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(position = "jitter", alpha = 0.5,
+             aes(colour = model)) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  coord_flip() +
+  labs(title = "All Data Model Performance",
+       y = "Absolute percent error", x = "Streams")
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(filter(model.rank,
+               model == "rom.genB"), "r_objects/01_Model_Ranks_from_All_ROM_GenB_Model.rds")
+saveRDS(filter(model.rank,
+               model == "rom.gen"), "r_objects/01_Model_Ranks_from_All_ROM_Gen_Model.rds")
+saveRDS(filter(model.rank,
+               model == "rom.agg"), "r_objects/01_Model_Ranks_from_All_ROM_Agg_Model.rds")
+saveRDS(filter(model.rank,
+               model == "rom.size"), "r_objects/01_Model_Ranks_from_All_ROM_Size_Model.rds")
+saveRDS(filter(model.rank,
+               model == "rom.wc"), "r_objects/01_Model_Ranks_from_All_ROM_WC_Model.rds")
+saveRDS(filter(model.rank,
+               model == "rom.estu.single"), "r_objects/01_Model_Ranks_from_All_ROM_Estu_Model.rds")
+```
+
+```{r}
+
+```
+

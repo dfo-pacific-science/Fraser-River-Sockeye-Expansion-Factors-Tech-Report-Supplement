@@ -1,0 +1,1747 @@
+---
+title: "01-04-Linear-Regressions"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+There are three Set-Levels where GLM models are developed in this script.
+Two models developed at the Generlized (1) Level;
+Two models developed at the Size-Aggregate (2) Level and
+Eight models developed at the Individual (5) Level, although these models are
+developed within the framework of a loop.
+
+Each model section follows the same steps:
+Plot correlations between independent variables
+Make a Global Model with and without interaction terms
+Calculate the Variance Inflation Factors
+Drop covariates based on correlations and VIF
+Develop a reduced model and compare it against the global models with AICc
+Dredge the reduced model
+Select a "top" model
+Investigate its residuals and outliers and summarize its parameters
+Save the model as an rds and calculate the leave-one-out fits
+Save the "Model Ranks", which are actually the files used to create model ranks
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(MASS) # boxcox
+library(lme4) # generalized linear regressions
+library(MuMIn) # dredge
+library(PerformanceAnalytics) # correlation figure
+library(car)       # for vif()
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # labels = percent
+```
+
+## Functions
+```{r}
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+## Data
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+```
+
+## Specifications FILE
+```{r}
+modout <- "./r_objects/models/model_specifications.rds"
+spec.out <- readRDS(modout)
+```
+
+## Base Plots
+https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+```{r colour pallet}
+size.cols = c("#E69F00", # Large
+              "#56B4E9", # Medium (including the smalls)
+              "#D55E00", # V. Small
+              "#CC79A7") # X-Large
+```
+
+# All Data Linear Regression
+Multiple Linear regression models will be explored, starting with ones that
+include all data points to "maximize" the amount of information that is
+available.
+Later, data will be explicitly broken apart to test if covariates behave
+differently for different categories of system based on size.
+
+#1
+## Global Model
+### Link Selection
+```{r}
+glm.pois <- glm(hpe ~ lpe, data = cal, family = poisson(link = "log"))
+glm.nb <- glm.nb(hpe ~ lpe, data = cal, link="log")
+
+summary(glm.pois)
+# For Poisson models, it is important to look at residual deviance divided by 
+# the degrees of freedom. When this quotient is larger than 1, 
+# the negative binomial should be considered.
+glm.pois$deviance / glm.pois$df.residual
+
+summary(glm.nb)
+glm.nb$deviance / glm.nb$df.residual
+
+arrange(MuMIn::AICc(glm.pois, glm.nb), AICc) %>% 
+  mutate(delta = AICc - min(AICc))
+```
+
+This is a rough test to determine the type of over dispersion may be in a model
+```{r negative binomial}
+dg <- cal %>%
+  group_by(size) %>%
+  summarise(m = mean(hpe), v = var(hpe))
+ggplot(dg, aes(m, v)) +
+  geom_smooth(method = "lm", formula = y ~ x - 1, se = F, color = "blue") + # neg binom 1
+  geom_smooth(method = "lm", 
+    formula = y ~ I(x^2) + offset(x) - 1, colour = "red", se = F) + # neg binom 2
+  geom_abline(intercept = 0, slope = 1, lty = 2) +
+  geom_point()
+```
+Looks like neither are necessarily supported highly, 
+but maybe negative binomial 2 is better for the early data points.
+
+### Covariate Selection
+Canopy Cover was deemed to be less helpful due to sudden changes by fire or
+other year-to-year variation and that it wouldn't be that influential on
+observer efficiency. (statement from a prior report)
+```{r}
+m.global <- glm.nb(hpe ~ size*lnlpe.sc + system_stability + water_clarity*lnlpe.sc + 
+                           substrate_shade + large_woody_debris + 
+                           lpe_method*lnlpe.sc 
+                   + lnlpe.sc + size + water_clarity + lpe_method, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=cal,
+                   link="log")
+# glm.nb default negative binomial family is neg binom 2
+
+# Model Checking
+# https://www.sfu.ca/sasdoc/sashtml/insight/chap39/sect56.htm
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.global)), residuals(m.global, type = "pearson"))
+# Model Summary
+summary(m.global)
+
+# Global Model with No Interaction for VIFF
+m.global.no.interaction <- glm.nb(hpe ~ size + system_stability + water_clarity + 
+                           substrate_shade + large_woody_debris + 
+                           lpe_method + lnlpe.sc, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=cal,  
+                   link="log")
+
+# plot(log(fitted(m.global.no.interaction)), residuals(m.global.no.interaction, type = "response"))
+plot(log(fitted(m.global.no.interaction)), residuals(m.global.no.interaction, type = "pearson"))
+# looks worse than with the interactions
+
+summary(m.global.no.interaction)
+```
+
+#### Correlation Coefficients
+```{r correlation figure}
+cal.cor <- round2(cor(dplyr::select(cal, size_recode, stability_recode, water_clarity_recode, 
+                 substrate_shade_recode, canopy_cover_recode, lwd_recode,
+                 lpe_method_recode, lnlpe.sc)), 3)
+cal.cor
+
+chart.Correlation(dplyr::select(cal, size_recode, stability_recode, 
+                                water_clarity_recode, substrate_shade_recode, 
+                                canopy_cover_recode, lwd_recode, 
+                                lpe_method_recode, lnlpe.sc), 
+                  histogram = TRUE, method = "pearson")
+```
+Size is >0.6 correlated with stability, canopy, large woody debris, lpe_method, and lpe
+Stability is >0.6 with canopy and size
+Water clarity is 0.4-0.5 with size, stability, canopy, and method
+Substrate is < 0.3 with all.
+Canopy is > 0.6 with size, stability, lwd, method and >0.5 with lpe
+LWD is >0.6 with size, canopy, and lpe
+Method is >0.6 with size and canopy
+lpe is >0.6 with size, and lwd, and >0.5 with canopy.
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical variables:
+https://statisticalhorizons.com/multicollinearity/
+```{r}
+vif(m.global)
+vif(m.global.no.interaction)
+```
+
+Summary:
+lnlpe.sc has the highest VIF, but likely because it is directly interacting
+with size.
+Generally, categorical variables may also have high VIFs due to their nature.
+
+For now, I am keeping with the interpretation without the interaction term.
+
+Summary without the interaction term:
+system stability had the highest VIF and is highly correlated with size.
+size is also highly correlated with large woody debris. Size has the second
+highest VIF after system stability.
+
+One option would be to remove size, but I propose that it is more important than
+stability and LWD for estimating observer efficiency for Sockeye. I could see
+LWD being important for Coho but not necessarily for Sockeye.
+
+Considering Size as a primary variable of interest, only water clarity and
+substrate shade are < 0.5 correlated with it.
+There is also a base inclination that method ought to be important, so also
+retaining it despite its high correlation with size.
+
+## Top Model
+```{r}
+m.size.all.slp <- glm.nb(hpe ~ size*lnlpe.sc + water_clarity*lnlpe.sc + 
+                           substrate_shade*lnlpe.sc + lpe_method*lnlpe.sc +
+                           water_clarity + substrate_shade + 
+                           lpe_method + size + lnlpe.sc, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=cal,  
+                   link="log")
+
+png(file = "./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.size.all.slp)), residuals(m.size.all.slp, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Generalized (1) - Clarity GLM")
+abline(h = 0)
+dev.off()
+# possible outliers
+cal$usid[which(abs(residuals(m.size.all.slp, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.size.all.slp))
+abline(h = 4/nrow(cal), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.size.all.slp)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal$usid[which(cooks.distance(m.size.all.slp) > 3*mean(cooks.distance(m.size.all.slp)))]
+
+summary(m.size.all.slp)
+
+m.coef <- as.data.frame(summary(m.size.all.slp)$coefficients)
+m.coef$parameter = row.names(m.coef)
+colnames(m.coef)[2] = "std.error"
+
+ggplot(filter(m.coef, parameter != "(Intercept)"),
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error),
+                width = 0.5) +
+  geom_hline(yintercept = 0) +
+  coord_flip() +
+  labs(x = "Parameter")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.coef <- dplyr::select(m.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) %>% 
+  mutate(cross.zero = ifelse(abs(Estimate) < abs(std.error), "Yes", "No"))
+write.csv(m.coef, file = "./tables/01_04-GeneralizedAll-Parameters.csv",
+          row.names = F)
+```
+
+### Comparing Size Models
+```{r comparing global models}
+# these are the TMB models
+arrange(MuMIn::AICc(m.size.all.slp,
+                    m.global, m.global.no.interaction), AICc) %>% 
+  mutate(delta = AICc - min(AICc))
+
+# size interaction with slope excluding system stability and large woody debris (m.size.slp)
+# is most parsimonious relative to global within 2 AICc.
+```
+
+```{r}
+m.dredge <- dredge(m.size.all.slp, beta = "none", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 4)) %>% 
+  dplyr::select(lnlpe.sc:delta)
+
+write.csv(m.dredge, file = "./tables/01_04-GeneralizedAll.csv", na = "", row.names = F)
+```
+Top model from original selection (m.size.all.slp).
+It is within 2 AICc of the top models.
+Not going with most parsimonious as I am interested in the additional explanatory
+power of covariates.
+Slight risk of an overfit model, but parameter estimates should be more accurate.
+
+## Leave One Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+saveRDS(m.size.all.slp, file = "./r_objects/models/All_Clarity_Model.rds")
+
+specifications_out <- data.frame(model = c("All_Clarity_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1,2,3),
+                                 type = c("log","center","scale"),
+                                 transform = c(NA, mean(cal$lnlpe), sd(cal$lnlpe)))
+
+spec.out <- spec.out %>% 
+  filter(model != "All_Clarity_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+```{r}
+model = m.size.all.slp
+for(i in 1:nrow(cal)){
+    m.temp <- glm.nb(as.character(model$call)[2],
+                     data=cal[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+    p.temp <- predict(m.temp, type="link", cal[i, ], se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = cal$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                        calibrated.estimate = exp(p.temp$fit)))
+
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 1)
+
+```
+### Plots
+```{r box and whisker of percent error by system}
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(position = "jitter", alpha = 0.5,
+             aes(colour = lpe_method)) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  coord_flip() +
+  labs(title = "All Data Model Performance",
+       y = "Absolute percent error", x = "Streams",
+       colour = "Survey Method")
+```
+Easy to pick out that Middle River, Scotch Creek, Nadina, Tachie, Harrison, 
+Stellako, and maybe Gluske are the biggest problem children
+Either do to the number of > 1 absolute percent errors or generally just the
+spread of errors.
+
+### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_All_Clarity_Model.rds")
+```
+
+### Lower < Training
+This section is to investigate out-of-range behaviour of the model.
+"Out-of-range" with regards to visual counts being lower than the training data
+```{r}
+# creating a data set to show behaviour near the origin
+dat.origin <- expand_grid(size = unique(cal$size),
+                          water_clarity = unique(cal$water_clarity),
+                          substrate_shade = unique(cal$substrate_shade),
+                          lpe_method = unique(cal$lpe_method),
+                          lpe = seq(1,25000, by = 1)) %>% 
+  mutate(lnlpe.sc = (log(lpe) - mean(cal$lnlpe)) / sd(cal$lnlpe) )
+
+# create model fits
+dat.origin.fit <- predict(m.size.all.slp, type="link", dat.origin, se.fit=T)
+
+# add model fits as well as comparison to default 1.8 method
+dat.origin <- dat.origin %>% 
+  mutate(fit = dat.origin.fit$fit,
+         se.fit = dat.origin.fit$se.fit,
+         expanded = exp(fit),
+         expanded.lower = exp(fit - se.fit),
+         expanded.upper = exp(fit + se.fit),
+         default = lpe*1.8,
+         dif = expanded - default,
+         per.dif = dif / default,
+         ratio = expanded / lpe) %>% 
+  mutate(substrate_shade = as.factor(substrate_shade),
+         substrate_shade = factor(substrate_shade, levels = c("Light",
+                                                              "Medium",
+                                                              "Dark")),
+         size = as.factor(size),
+         size = factor(size, levels = c("Small", "Medium", "Large", "X-Large")))
+
+# Figure A
+# # All 4 Sizes up to 200
+dat.origin %>% 
+  filter(lpe_method == "Ground",
+         #size %in% c("Medium", "Small"),
+         lpe < 200) %>% 
+  ggplot(aes(x = lpe,
+             y = expanded, colour = water_clarity)) +
+  geom_line() +
+  geom_line(aes(y = default, colour = "Default")) +
+  geom_abline(lty = 2) +
+  scale_colour_manual(name = "Water Clarity \n or Default",
+                      values = c("grey", "red", "black"),
+                      labels = c("Clear", "Default", "Turbid/Tannic")) +
+  facet_grid(size~substrate_shade, scales = "free_y") +
+  labs(x = "Visual Count", y = "Expanded Estimate")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin.png",
+       width = 6, height = 5, dpi = 150)
+
+# Figure B
+# # Small up to 10,000
+dat.origin %>% 
+  filter(size %in% c("Small"),
+         lpe < 10001) %>% 
+  ggplot(aes(x = lpe,
+             y = expanded, colour = water_clarity)) +
+  geom_line() +
+  geom_line(aes(y = default, colour = "Default")) +
+  geom_abline(lty = 2) +
+  facet_grid(lpe_method~substrate_shade) +
+  labs(title = "Size: Small")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Small.png",
+       width = 7, height = 3.5, dpi = 150)
+
+# Figure C1
+# # Small up to 20,000 only Medium Substrate
+dat.origin %>% 
+  filter(size %in% c("Small"),
+         substrate_shade == "Medium") %>% 
+  ggplot(aes(x = lpe,
+             y = expanded, colour = water_clarity)) +
+  geom_line() +
+  geom_line(aes(y = default, colour = "Default")) +
+  geom_abline(lty = 2) +
+  facet_grid(lpe_method~substrate_shade) +
+  labs(title = "Size: Small")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Small-ZoomOut.png",
+       width = 5, height = 3.5, dpi = 150)
+
+# Figure C2
+# # Small up to 500 only Medium Substrate
+dat.origin %>% 
+  filter(size %in% c("Small"),
+         substrate_shade == "Medium",
+         lpe < 501) %>% 
+  ggplot(aes(x = lpe,
+             y = expanded, colour = water_clarity)) +
+  geom_line() +
+  geom_line(aes(y = default, colour = "Default")) +
+  geom_abline(lty = 2) +
+  facet_grid(lpe_method~substrate_shade) +
+  labs(title = "Size: Small")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Small-ZoomIn.png",
+       width = 3.75, height = 3.5, dpi = 150)
+
+# Summarizing the percent difference between the clear and turbid estimates
+dat.origin.summary <- dat.origin %>% 
+  dplyr::select(size:lpe,expanded) %>% 
+  filter(size == "Small") %>% 
+  pivot_wider(names_from = water_clarity,
+              values_from = expanded) %>% 
+  mutate(dif = Pt_Turb_Tannic - Clear,
+         per.dif = (dif / Clear)*100)
+
+filter(dat.origin.summary, lpe == 500)
+
+# Figure D
+# # Figure of the Percent Difference between Clear and Turbid
+dat.origin.summary %>% 
+  ggplot(aes(x = lpe, y = per.dif)) +
+  geom_line() +
+  facet_grid(lpe_method~substrate_shade) +
+  labs(title = "Size: Small", 
+       y = "Percent Difference Between \n Clear to Turbid Tannic")
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Percent-Diff.png",
+       width = 7, height = 3.75, dpi = 150)
+
+# Figure E
+# # Figure of Percent Difference between Clear and 1.8
+  dat.origin %>% 
+  filter(size %in% c("Small"),
+         substrate_shade == "Medium") %>% 
+  ggplot(aes(x = lpe, y = per.dif)) +
+  geom_line() +
+  facet_grid(lpe_method~water_clarity, scales = "free_y") +
+  scale_y_continuous(labels = percent) +
+  geom_hline(yintercept = 1, lty = 2, col = "grey") +
+  geom_hline(yintercept = 2, lty = 2, col = "grey20") +
+  labs(title = "Clarity GLM for Size: Small - Relative to 1.8", 
+       y = "Percent Difference Between \n GLM to 1.8 Default")
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Percent-Diff-Rel-Default.png",
+       width = 5, height = 4, dpi = 150)
+
+dat.origin %>% 
+  filter(size %in% c("Small"),
+         substrate_shade == "Medium",
+         lpe == 500) %>% 
+  group_by(size, substrate_shade, lpe_method, water_clarity) %>% 
+  summarise(min.per.dif = min(per.dif),
+            max.per.dif = max(per.dif))
+
+# Summarizing the percent difference between the ground and aerial estimates
+dat.origin.summary.method <- dat.origin %>% 
+  dplyr::select(size:lpe,expanded) %>% 
+  filter(size == "Small") %>% 
+  pivot_wider(names_from = lpe_method,
+              values_from = expanded) %>% 
+  mutate(dif = Aerial - Ground,
+         per.dif = (dif / Ground)*100)
+
+filter(dat.origin.summary.method, lpe == 500)
+
+# Summarizing the percent difference between the clear and turbid estimates AND Method
+dat.origin.summary.method.clarity <- dat.origin %>% 
+  dplyr::select(size:lpe,expanded) %>% 
+  filter(size == "Small") %>% 
+  pivot_wider(names_from = c(water_clarity, lpe_method),
+              values_from = expanded) %>% 
+  mutate(dif = Pt_Turb_Tannic_Aerial - Clear_Ground,
+         per.dif = (dif / Clear_Ground)*100)
+
+filter(dat.origin.summary.method.clarity, lpe == 1)
+filter(dat.origin,
+       lpe == 2230,
+       size == "Small",
+       substrate_shade == "Light")
+```
+
+#### Additional Figures
+```{r}
+minimums <- readRDS("./r_objects/00-Regression_LPE_Ranges.rds")
+minimums$size <- factor(minimums$size, levels = c("Small", "Medium", 
+                                                  "Large", "X-Large"))
+
+minimums2 <- minimums %>% 
+  rename(lpe = min10) %>% 
+  left_join(., 
+            dplyr::select(dat.origin,
+                         size, lpe_method, lpe, substrate_shade, water_clarity,
+                         lnlpe.sc, fit, se.fit, expanded, ratio))
+
+cal %>% 
+  filter(lpe < 25000) %>% 
+  ggplot(aes(x = lpe, y = hpe/lpe, 
+             colour = water_clarity)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_point(size = 2) +
+  scale_colour_manual(name = "Water Clarity",
+                      values = c("gray", 
+                                 "black"),
+                      labels = c("Clear", "Turbid/Tannic")) +
+  ggnewscale::new_scale_colour() +
+  geom_point(aes(colour = size)) +
+  geom_vline(data = minimums[-nrow(minimums),],
+             aes(xintercept = min10,
+                 colour = size)) +
+  scale_colour_manual(name = "Size",
+                      values = size.cols) +
+  ggnewscale::new_scale_colour() +
+  geom_line(data = filter(dat.origin,
+                          size == "Small",
+                          substrate_shade == "Medium"),
+            aes(x = lpe, y = ratio, colour = water_clarity)) +
+    scale_colour_manual(name = "Water Clarity",
+                      values = c("gray", 
+                                 "black"),
+                      labels = c("Clear", "Turbid/Tannic")) +
+  facet_wrap(~lpe_method) +
+  labs(y = "Expansion Factor", x = "Visual Count") 
+
+ggsave("./figures/LPE_Clarity_Size_Method_Ratios.png",
+       height = 4.5, width = 10, dpi = 150)
+
+# < 10000
+cal %>% 
+  filter(lpe < 10000) %>% 
+  ggplot(aes(x = lpe, y = hpe/lpe, 
+             colour = water_clarity)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_point(size = 2) +
+  geom_point(aes(colour = size)) +
+  scale_colour_manual(values = c("gray", size.cols[c(2)], 
+                                 "black", size.cols[c(3,4)])) +
+  facet_wrap(~lpe_method) +
+  geom_vline(data = filter(minimums, min10 < 10000),
+             aes(xintercept = min10,
+                 colour = size)) +
+  geom_line(data = filter(dat.origin,
+                          size == "Small",
+                          substrate_shade == "Medium",
+                          lpe < 10000),
+            aes(x = lpe, y = ratio)) +
+  labs(y = "Expansion Factor", x = "Visual Count") 
+
+ggsave("./figures/LPE_Clarity_Size_Method_Ratios_10000.png",
+       height = 4.5, width = 10, dpi = 150)
+
+# X-Large <25000
+cal %>% 
+  filter(lpe < 25000) %>% 
+  ggplot(aes(x = lpe, y = hpe/lpe, 
+             colour = water_clarity)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_point(size = 2) +
+  geom_point(aes(colour = size)) +
+  scale_colour_manual(values = c("gray", size.cols[c(1,2)], 
+                                 "black", size.cols[c(3,4)])) +
+  facet_wrap(~lpe_method) +
+  geom_vline(data = filter(minimums, min10 < 10000),
+             aes(xintercept = min10,
+                 colour = size)) +
+  geom_line(data = filter(dat.origin,
+                          size == "X-Large",
+                          substrate_shade == "Medium",
+                          lpe < 25000),
+            aes(x = lpe, y = ratio)) +
+  ylim(c(0, 42)) +
+  labs(y = "Expansion Factor", x = "Visual Count",
+       title = "X-Large")
+
+# Large <25000
+cal %>% 
+  filter(lpe < 25000) %>% 
+  ggplot(aes(x = lpe, y = hpe/lpe, 
+             colour = water_clarity)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_point(size = 2) +
+  geom_point(aes(colour = size)) +
+  scale_colour_manual(values = c("gray", size.cols[c(1,2)], 
+                                 "black", size.cols[c(3,4)])) +
+  facet_wrap(~lpe_method) +
+  geom_vline(data = filter(minimums, min10 < 10000),
+             aes(xintercept = min10,
+                 colour = size)) +
+  geom_line(data = filter(dat.origin,
+                          size == "Large",
+                          substrate_shade == "Medium",
+                          lpe < 25000),
+            aes(x = lpe, y = ratio)) +
+  ylim(c(0, 42)) +
+  labs(y = "Expansion Factor", x = "Visual Count",
+       title = "Large")
+```
+
+### Ratios for Low Abundance
+```{r}
+# creating low abundance subset-based ratio estimators
+m.ratios <- cal %>% 
+  filter(lpe <= 10000) %>% 
+  group_by(water_clarity) %>% 
+  summarise(MoR = mean(hpe/lpe),
+            MedianOR = median(hpe/lpe),
+            ROM = mean(log(hpe)) / mean(log(lpe)),
+            RoMedians = median(hpe) / median(lpe),
+            n = n())
+
+# adding it to the origin data grid
+dat.origin <- left_join(dat.origin, m.ratios)
+
+# calculating the ratio based expanded estimates
+dat.origin <- dat.origin %>% 
+  mutate(MoR.expanded = MoR*lpe,
+         MedianOR.expanded = MedianOR*lpe,
+         ROM.expanded = exp(log(lpe)*ROM),
+         RoMedians.expanded = lpe*RoMedians)
+
+# selecting the specific expanded results and pivoting them longer for easier plotting
+dat.origin2 <- dat.origin %>% 
+  dplyr::select(size:lpe, expanded, default, MoR.expanded:RoMedians.expanded) %>% 
+  rename(glm.expanded = expanded, default.expanded = default) %>% 
+  pivot_longer(cols = glm.expanded:RoMedians.expanded,
+               names_to = "Model",
+               values_to = "Expanded",
+               names_pattern = "(.*)\\.expanded")
+
+# Figure A
+# Small comparing different ratio types < 500
+dat.origin2 %>% 
+  filter(size == "Small",
+         substrate_shade == "Medium",
+         lpe_method == "Ground",
+         lpe < 500,
+         Model != "default") %>% 
+  ggplot(aes(x = lpe, y = Expanded, colour = water_clarity)) +
+  geom_line() +
+  geom_line(aes(y = lpe*1.8, colour = "Default"), alpha = 0.8) +
+  geom_abline(lty = 2) +
+  #scale_colour_manual(values = c("#E69F00",  "#009E73", 
+  #               "#F0E442", "#0072B2", "#D55E00", "#CC79A7")) +
+  facet_grid(~Model) +
+  labs(title = "Size: Small")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Ratio-Compare.png",
+       width = 9, height = 2.5, dpi = 150)
+
+# Figure B
+# Small comparing different ratio types up to 10,000
+dat.origin2 %>% 
+  filter(size == "Small",
+         substrate_shade == "Medium",
+         lpe_method == "Ground",
+         #lpe < 500,
+         Model != "default") %>% 
+  ggplot(aes(x = lpe, y = Expanded, colour = water_clarity)) +
+  geom_line() +
+  geom_line(aes(y = lpe*1.8, colour = "Default"), alpha = 0.8) +
+  geom_abline(lty = 2) +
+  #scale_colour_manual(values = c("#E69F00",  "#009E73", 
+  #               "#F0E442", "#0072B2", "#D55E00", "#CC79A7")) +
+  facet_grid(~Model) +
+  labs(title = "Size: Small")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-Origin-Ratio-Compare-Full.png",
+       width = 10, height = 2.5, dpi = 150)
+```
+
+## 1.8 Expansion
+```{r}
+model.rank2 <- model.rank %>% 
+  left_join(., dplyr::select(cal, usid, lpe)) %>% 
+    mutate(fit = lpe*1.8,
+           error = fit - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         se.fit = sd(error), # just a quick made up place holder for 1.8 expansion se.fit error
+         calibrated.estimate = fit,
+         model = "hpe ~ lpe*1.8",
+         rank.set.level = 1) %>% 
+      dplyr::select(-lpe)
+```
+### Save Model Ranks
+```{r}
+saveRDS(model.rank2, "r_objects/01_Model_Ranks_from_All_Data_Classic_Expansion.rds")
+```
+
+#2
+## All Minimal Model
+Noted that recovering survey data such as water clarity was not easily done.
+Created a model without water clarity and method.
+Only Substrate Shade and Size as those are fixed by the system type.
+```{r}
+m.reduc.g <- glm.nb(hpe ~ lnlpe.sc + size + substrate_shade + 
+                      size*lnlpe.sc + substrate_shade*lnlpe.sc, 
+    data=cal, 
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+summary(m.reduc.g)
+
+png(file = "./figures/01_Model_Diagnostics/01-04-GeneralizedMinimal-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.reduc.g)), residuals(m.reduc.g, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Generalized (1) - Minimal GLM")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+cal$usid[which(abs(residuals(m.reduc.g, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.reduc.g))
+abline(h = 4/nrow(cal), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.reduc.g)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal$usid[which(cooks.distance(m.reduc.g) > 3*mean(cooks.distance(m.reduc.g)))]
+
+m.coef <- as.data.frame(summary(m.reduc.g)$coefficients)
+m.coef$parameter = row.names(m.coef)
+colnames(m.coef)[2] = "std.error"
+
+ggplot(filter(m.coef, parameter != "(Intercept)"),
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error),
+                width = 0.5) +
+  geom_hline(yintercept = 0) +
+  coord_flip() +
+  labs(x = "Parameter")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedMinimal-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.coef <- dplyr::select(m.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) %>% 
+  mutate(cross.zero = ifelse(abs(Estimate) < abs(std.error), "Yes", "No"))
+write.csv(m.coef, file = "./tables/01_04-GeneralizedMinimal-Parameters.csv",
+          row.names = F)
+
+m.dredge <- dredge(m.reduc.g, beta = "none", rank = "AICc")
+m.dredge
+# global is top
+# 
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 5)) %>% 
+  dplyr::select(lnlpe.sc:delta)
+
+write.csv(m.dredge, file = "./tables/01_04-GeneralizedMinimal.csv", na = "", row.names = F)
+```
+
+## Leave One Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+saveRDS(m.reduc.g, file = "./r_objects/models/All_Minimal_Model.rds")
+
+specifications_out <- data.frame(model = c("All_Minimal_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1,2,3),
+                                 type = c("log","center","scale"),
+                                 transform = c(NA, mean(cal$lnlpe), sd(cal$lnlpe)))
+
+spec.out <- spec.out %>% 
+  filter(model != "All_Minimal_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+```{r}
+model = m.reduc.g
+for(i in 1:nrow(cal)){
+    m.temp <- glm.nb(as.character(model$call)[2],
+                     data=cal[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+    p.temp <- predict(m.temp, type="link", cal[i, ], se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = cal$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 1)
+
+```
+### Plots
+```{r box and whisker of percent error by system}
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(position = "jitter", alpha = 0.5,
+             aes(colour = lpe_method)) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  coord_flip() +
+  labs(title = "All Data Model Performance",
+       y = "Absolute percent error", x = "Streams",
+       colour = "Survey Method")
+
+#ggsave("figures/Model Performance/01_Model_Performance_All_Minimal_Model.png",
+#       height = 6, width = 8, dpi = 150)
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_All_Minimal_Model.rds")
+```
+
+### Higher > Training
+```{r}
+# reading in the ROM General Models
+rom <- readRDS("./r_objects/models/All_ROM_Gen_Model.rds")
+romb <- readRDS("./r_objects/models/All_ROM_GenB_Model.rds")
+rom$lpe_method <- c("Aerial", "Ground")
+
+# creating a data set to show behaviour near the origin
+dat.abund <- expand_grid(size = unique(cal$size),
+                          #water_clarity = unique(cal$water_clarity),
+                          substrate_shade = unique(cal$substrate_shade),
+                          lpe_method = unique(cal$lpe_method),
+                          lpe = seq(75000,500000, by = 1000)) %>% 
+  mutate(lnlpe = log(lpe),
+         lnlpe.sc = (log(lpe) - mean(cal$lnlpe)) / sd(cal$lnlpe) ) %>% 
+  left_join(., rom) %>% 
+  mutate(rom.fit = lnlpe*rom,
+         rom.expanded = exp(rom.fit),
+         romb.fit = lnlpe*romb$rom,
+         romb.expanded = exp(romb.fit))
+
+# create model fits
+dat.abund.fit <- predict(m.reduc.g, type="link", dat.abund, se.fit=T)
+
+# add model fits as well as comparison to default 1.8 method
+dat.abund <- dat.abund %>% 
+  mutate(glm.fit = dat.abund.fit$fit,
+         se.fit = dat.abund.fit$se.fit,
+         glm.expanded = exp(glm.fit),
+         expanded.lower = exp(glm.fit - se.fit),
+         expanded.upper = exp(glm.fit + se.fit),
+         default.expanded = lpe*1.8,
+         dif = glm.expanded - default.expanded,
+         per.dif = dif / default.expanded) %>% 
+  mutate(substrate_shade = as.factor(substrate_shade),
+         substrate_shade = factor(substrate_shade, levels = c("Light",
+                                                              "Medium",
+                                                              "Dark")),
+         size = as.factor(size),
+         size = factor(size, levels = c("Small", "Medium", "Large", "X-Large")))
+
+# selecting the specific expanded results and pivoting them longer for easier plotting
+dat.abund2 <- dat.abund %>% 
+  dplyr::select(size:lpe, rom.expanded, romb.expanded, glm.expanded, default.expanded) %>% 
+  pivot_longer(cols = rom.expanded:default.expanded,
+               names_to = "Model",
+               values_to = "Expanded",
+               names_pattern = "(.*)\\.expanded") %>% 
+  mutate(sub.mod.filter = paste0(substrate_shade, ".", Model),
+         Model = as.factor(Model),
+         Model = factor(Model, levels = c("glm", "default", "rom", "romb")))
+
+# Stop figures from having scientific notation
+options(scipen=999)
+
+# Figure A
+# Excluding Small - Compare ROM with GLM - Ground
+dat.abund2 %>% 
+  filter(lpe_method == "Ground",
+         Model != "romb") %>% 
+  ggplot(aes(x = lpe, y = Expanded, colour = Model)) +
+  geom_line() +
+  geom_abline(lty = 2) +
+  geom_vline(xintercept = 300000, lty = 3, alpha = 0.5) +
+  scale_colour_manual(values = c("orange", "red", "#56B4E9"),
+                      labels = c("Minimal GLM",
+                                 "Defualt 1.8",
+                                 "Ratio of Means \n General Ground")) +
+  facet_grid(size~substrate_shade) +
+  labs(title = "Ground", x = "Visual Count", y = "Expanded Estimate")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-HighAbundance-Compare-Ground.png",
+       width = 9, height = 7, dpi = 150)
+
+# Figure B
+# Excluding Small - Compare ROM with GLM - Aerial
+dat.abund2 %>% 
+  filter(lpe_method == "Aerial",
+         Model != "rom") %>% 
+  ggplot(aes(x = lpe, y = Expanded, colour = Model)) +
+  geom_line() +
+  geom_abline(lty = 2) +
+  geom_vline(xintercept = 300000, lty = 3, alpha = 0.5) +
+  scale_colour_manual(values = c("orange", "red", "#009E73"),
+                      labels = c("Minimal GLM",
+                                 "Defualt 1.8",
+                                 "Ratio of Means \n General Both")) +
+  facet_grid(size~substrate_shade) +
+  labs(title = "Aerial", x = "Visual Count", y = "Expanded Estimate")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-HighAbundance-Compare-Aerial.png",
+       width = 9, height = 7, dpi = 150)
+
+
+# Figure A2 SMALL
+# Excluding Small - Compare ROM with GLM - Ground < 200,000
+dat.abund2 %>% 
+  filter(lpe_method == "Ground",
+         size != "Small",
+         lpe < 200001) %>% 
+  ggplot(aes(x = lpe, y = Expanded, colour = Model)) +
+  geom_line() +
+  geom_abline(lty = 2) +
+  #scale_colour_manual(values = c("#E69F00",  "#009E73", 
+  #               "#F0E442", "#0072B2", "#D55E00", "#CC79A7")) +
+  facet_grid(size~substrate_shade) +
+  labs(title = "Ground")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-HighAbundance-Compare-Ground-Small.png",
+       width = 12, height = 7, dpi = 150)
+
+# Figure B2 SMALL
+# Excluding Small - Compare ROM with GLM - Aerial  < 200,000
+dat.abund2 %>% 
+  filter(lpe_method == "Aerial",
+         size != "Small",
+         lpe < 200001) %>% 
+  ggplot(aes(x = lpe, y = Expanded, colour = Model)) +
+  geom_line() +
+  geom_abline(lty = 2) +
+  #scale_colour_manual(values = c("#E69F00",  "#009E73", 
+  #               "#F0E442", "#0072B2", "#D55E00", "#CC79A7")) +
+  facet_grid(size~substrate_shade) +
+  labs(title = "Aerial")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-GeneralizedAllData-HighAbundance-Compare-Aerial-Small.png",
+       width = 12, height = 7, dpi = 150)
+```
+
+# Size Aggregate Models
+# 3
+# SM
+Removing systems that are big outliers such as Harrison and Tachie and Middle
+All of these systems are X-LargeL as well
+
+Little River is the only other system in the X-Large category but it only has
+four samples, so I am removing all X-Large and Large.
+
+Later determined that Adding Large Data may improve the fit. (?)
+Large Data was also quite an outlier relative to the Medium and Small Data though.
+Decided on removing Large and X-Large.
+```{r}
+cal2 <- cal %>% 
+  filter(size != "X-Large",
+         size != "Large") %>% 
+  mutate(lnlpe.sc = (lnlpe-mean(lnlpe))/sd(lnlpe))
+```
+
+```{r}
+cal2 %>%  
+  ggplot(aes(x = lnlpe.sc, y = log(hpe), colour = size)) +
+  geom_point() +
+  labs(x = "ln(Scaled - Low Precision Estimate)", 
+       y = "ln(High Precision Estimate)") +
+  scale_colour_manual(values = size.cols[-c(1,4)])
+```
+
+## Correlation Coefficients
+```{r correlation figure}
+cal2.cor <- round2(cor(dplyr::select(cal2, size_recode, stability_recode, water_clarity_recode, 
+                 substrate_shade_recode, canopy_cover_recode, lwd_recode,
+                 lpe_method_recode, lnlpe.sc)), 3)
+cal2.cor
+
+#png(file="figures/Sockeye Calibration Correlation Plot no XL.png",
+#    units = "in", width=10, height=5, res = 250)
+
+chart.Correlation(dplyr::select(cal2, size_recode, stability_recode, 
+                                water_clarity_recode, substrate_shade_recode, 
+                                canopy_cover_recode, lwd_recode, 
+                                lpe_method_recode, lnlpe.sc), 
+                  histogram = TRUE, method = "pearson")
+#dev.off()
+```
+size is correlated with canopy, lwd, lpe_method, and lpe
+stability correlated with clarity and canopy
+clarity is somewhat with stability, canopy and lpe_method
+shade is good
+canopy is with size, stability, lwd, lpe_method, and lpe
+lwd is with size, canopy, and lpe
+
+## Global Model
+### Covariate Selection
+Canopy Cover was deemed to be less helpful due to sudden changes by fire or
+other year-to-year variation and that it wouldn't be that influential on
+observer efficiency.
+
+Size had the largest number of > 0.6 and only > 0.8 - remove.
+
+stability was correlated with clarity and canopy. Plus 
+the issue with recovering clarity in historical records makes it a little moot 
+to try. Putting it back in because we can make an effort to recover/give a
+good guess at what the clarity may be.
+
+Substrate Shade was good.
+
+LWD was .7 correlated with size, removing.
+lpe_method was also correlated with size, but making a SME decision to keep it in.
+Keeping it to test the global model.
+```{r}
+m.global <- glm.nb(hpe ~ size*lnlpe.sc + system_stability*lnlpe.sc + water_clarity*lnlpe.sc + 
+                           substrate_shade*lnlpe.sc + #large_woody_debris + 
+                           lpe_method*lnlpe.sc, 
+                   data=cal2,
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+
+summary(m.global)
+
+plot(log(fitted(m.global)), residuals(m.global, type = "pearson"))
+plot(log(fitted(m.global)), sqrt(abs(residuals(m.global, type = "pearson"))))
+
+m.global.no.interaction <- glm.nb(hpe ~ size + system_stability + water_clarity + 
+                           substrate_shade + #large_woody_debris + 
+                           lpe_method + lnlpe.sc, 
+                           data=cal2,
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+
+
+summary(m.global.no.interaction)
+
+plot(log(fitted(m.global.no.interaction)), residuals(m.global.no.interaction, type = "pearson"))
+plot(log(fitted(m.global.no.interaction)), sqrt(abs(residuals(m.global.no.interaction, type = "pearson"))))
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical2 variables:
+https://statistical2horizons.com/multicollinearity/
+```{r}
+vif(m.global) # with interaction 
+vif(m.global.no.interaction) # without interaction
+```
+
+Summary:
+lnlpe.sc has the highest VIF with interaction, but because it is directly interacting
+with size.
+Generally, categorical variables may also have high VIFs due to their nature.
+
+Keeping with the interpretation without the interaction term.
+
+Dropping Size, Canopy Cover, and LWD.
+Considered dropping Water_Clarity due to it not being 100% retrievable but keeping it in.
+Stability should be put back in
+
+## Reduced Model
+```{r size model with change in intercept}
+m.cal2.reduced <- glm.nb(hpe ~ lnlpe.sc + water_clarity + system_stability +
+                           substrate_shade + lpe_method +
+                        water_clarity*lnlpe.sc + system_stability*lnlpe.sc +
+                             substrate_shade*lnlpe.sc + lpe_method*lnlpe.sc, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=cal2,  
+                   link="log")
+
+plot(log(fitted(m.cal2.reduced)), residuals(m.cal2.reduced, type = "pearson"))
+plot(log(fitted(m.cal2.reduced)), sqrt(abs(residuals(m.cal2.reduced, type = "pearson"))))
+# possible outliers
+cal2$usid[which(abs(residuals(m.cal2.reduced, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.cal2.reduced))
+abline(h = 4/nrow(cal2), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.cal2.reduced)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal2$usid[which(cooks.distance(m.cal2.reduced) > 3*mean(cooks.distance(m.cal2.reduced)))]
+
+summary(m.cal2.reduced)
+```
+
+#### Comparing Size Models
+```{r comparing global models}
+# these are the TMB models
+arrange(MuMIn::AICc(m.global, m.global.no.interaction, m.cal2.reduced), AICc) %>% 
+  mutate(delta = AICc - min(AICc))
+
+# parsimony is best fit.
+# is within 2 AIC of the global, but most parsimonious.
+```
+
+```{r}
+m.dredge <- dredge(m.cal2.reduced, beta = "none", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 4)) %>% 
+  dplyr::select(lnlpe.sc:delta, -df, -logLik) %>% 
+  mutate(AICc = round2(AICc, 2),
+         delta = round2(delta, 2))
+
+write.csv(m.dredge, file = "./tables/01_04-SizeAggregate-SM.csv", na = "", row.names = F)
+```
+
+### Top Model
+```{r size model with change in intercept}
+m.cal2.candidate <- glm.nb(hpe ~ lnlpe.sc + water_clarity + 
+                           substrate_shade + lpe_method +
+                        water_clarity*lnlpe.sc +
+                             substrate_shade*lnlpe.sc + lpe_method*lnlpe.sc, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=cal2,  
+                   link="log")
+
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+png(file = "./figures/01_Model_Diagnostics/01-04-SizeAggregate-SM-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.cal2.candidate)), residuals(m.cal2.candidate, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Size Aggregate (2) - Small-Medium Model")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+cal2$usid[which(abs(residuals(m.cal2.candidate, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.cal2.candidate))
+abline(h = 4/nrow(cal2), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.cal2.candidate)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal2$usid[which(cooks.distance(m.cal2.candidate) > 3*mean(cooks.distance(m.cal2.candidate)))]
+cal2$hpe[which(cooks.distance(m.cal2.candidate) > 3*mean(cooks.distance(m.cal2.candidate)))]
+
+m.coef <- as.data.frame(summary(m.cal2.candidate)$coefficients)
+m.coef$parameter = row.names(m.coef)
+colnames(m.coef)[2] = "std.error"
+
+ggplot(filter(m.coef, parameter != "(Intercept)"),
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error),
+                width = 0.5) +
+  geom_hline(yintercept = 0) +
+  coord_flip() + 
+  labs(x = "Parameter")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-SizeAggregate-SM-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.coef <- dplyr::select(m.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) %>% 
+  mutate(cross.zero = ifelse(abs(Estimate) < abs(std.error), "Yes", "No"),
+         Estimate = round2(Estimate, 2),
+         std.error = round2(std.error, 2))
+write.csv(m.coef, file = "./tables/01_04-SizeAggregate-SM-Parameters.csv",
+          row.names = F)
+```
+
+## Leave One Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+saveRDS(m.cal2.candidate, file = "./r_objects/models/SM_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("SM_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1,2,3),
+                                 type = c("log","center","scale"),
+                                 transform = c(NA, mean(cal2$lnlpe), sd(cal2$lnlpe))) # note that in the future, may want to re-center and scale using the SM Data instead of the whole dataset
+
+spec.out <- spec.out %>% 
+  filter(model != "SM_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+```{r}
+model = m.cal2.candidate
+  for(i in 1:nrow(cal2)){
+    m.temp <- glm.nb(as.character(model$call)[2],
+                     data=cal2[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+    p.temp <- predict(m.temp, type="link", cal2[i, ], se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = cal2$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                        calibrated.estimate = exp(p.temp$fit)))
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal2,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 2)
+
+```
+### Plots
+```{r box and whisker of percent error by system}
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_point(position = "jitter", alpha = 0.5,
+             aes(colour = lpe_method)) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  coord_flip() +
+  labs(title = "Data excluding Large+ Model Performance",
+       y = "Absolute percent error", x = "Streams",
+       colour = "Survey Method")
+```
+
+## Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_SM_Data_Model.rds")
+```
+
+# 4
+# Analysis - L Only
+```{r}
+cal %>%  filter(size %in% c("X-Large", "Large")) %>% 
+  ggplot(aes(x = lnlpe.sc, y = log(hpe), colour = gazetted_stream_name)) +
+  geom_point() +
+  labs(x = "ln(Scaled - Low Precision Estimate)", 
+       y = "ln(High Precision Estimate)") 
+
+cal %>%  filter(size %in% c("X-Large", "Large")) %>% 
+  count(lpe_method, gazetted_stream_name)
+```
+While reviewing Harrison data more closely, it is notable that the ground
+surveys are not the entire river. The counts are also much lower than the
+aerial counts, to a degree that even a "ground" correction might not save them.
+Particularly for making an XL-only relationship, the only other ground was 1
+Little River survey, which was nearly identical to the aerial count done at the
+time.
+
+Removed Harrison Ground Surveys in the original database.
+```{r}
+cal3 <- cal %>% 
+  filter(size %in% c("X-Large", "Large")) %>% 
+  # using cloud_cover, so recoding it %>% 
+  mutate(cloud_cover_recode = case_when( # changing cover to a number
+      cloud_cover=="0"~1, 
+      cloud_cover=="25"~2, 
+      cloud_cover=="50"~3,
+      cloud_cover=="75"~4,
+      cloud_cover=="100"~5),
+      lnlpe.sc = (lnlpe - mean(lnlpe))/sd(lnlpe))
+```
+
+```{r}
+cal3 %>%  
+  ggplot(aes(x = lnlpe.sc, y = log(hpe), colour = water_clarity)) +
+  geom_point() +
+  labs(x = "ln(Scaled - Low Precision Estimate)", 
+       y = "ln(High Precision Estimate)") +
+  geom_smooth(method = "lm")
+
+summary(cal3)
+```
+Only 2 with different system_stability, remove.
+canopy only has 2 samples in High.
+brightness has 3 NAs
+cloud_cover has 3 NAs
+fish_vis has 2 NAs
+
+## Correlation Coefficients
+```{r correlation figure}
+cal3.cor <- round2(cor(dplyr::select(cal3, size_recode, water_clarity_recode, 
+                                    substrate_shade_recode, 
+                                    lpe_method_recode, lnlpe.sc)), 3)
+cal3.cor
+
+chart.Correlation(dplyr::select(cal3, size_recode, water_clarity_recode, 
+                                substrate_shade_recode, 
+                                lpe_method_recode, lnlpe.sc), 
+                  histogram = TRUE, method = "pearson")
+```
+Note that water clarity is mostly static within a system but there are some 
+Harrison surveys where it is not.
+
+size and method are correlated. Otherwise pretty ok.
+
+## Global Model
+### Covariate Selection
+Will keep both Water Clarity and Substrate Shade, but expect to drop one of them
+```{r}
+m.global <- glm.nb(hpe ~ size*lnlpe.sc + #system_stability + 
+                     water_clarity*lnlpe.sc + 
+                           substrate_shade*lnlpe.sc + #large_woody_debris + 
+                           lpe_method*lnlpe.sc, 
+                   data=cal3,
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+
+summary(m.global)
+
+plot(log(fitted(m.global)), residuals(m.global, type = "pearson"))
+
+m.global.no.interaction <- glm.nb(hpe ~ size + #system_stability + 
+                                    water_clarity + 
+                           substrate_shade + #large_woody_debris + 
+                           lpe_method + lnlpe.sc, 
+                           data=cal3,
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+
+
+summary(m.global.no.interaction)
+
+plot(log(fitted(m.global.no.interaction)), residuals(m.global.no.interaction, type = "pearson"))
+plot(log(fitted(m.global.no.interaction)), sqrt(abs(residuals(m.global.no.interaction, type = "pearson"))))
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+```{r}
+vif(m.global)
+vif(m.global.no.interaction)
+```
+
+Summary:
+All have relatively low VIF, so keeping them all.
+
+```{r}
+m.dredge <- dredge(m.global, beta = "none", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 3)) %>% 
+  dplyr::select(lnlpe.sc:delta, -df, -logLik) %>% 
+  mutate(AICc = round2(AICc, 2),
+         delta = round2(delta, 2))
+
+write.csv(m.dredge, file = "./tables/01_04-SizeAggregate-LXL.csv", na = "", row.names = F)
+```
+Top 2 models both have lpe and one of either size or water clarity.
+3rd model has all three, lpe, size, and clarity.
+
+No interaction terms nor method are included within < 2 AICc.
+
+Several models within 4 AIC.
+
+Going with the model that has size and water clarity.
+Not most Parsimonious, but would be most similar to a model averaged of < 2 AICc.
+
+## Top Model
+```{r}
+m.L.top <- glm.nb(hpe ~ lnlpe.sc + water_clarity + size, 
+    data=cal3,  
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+
+summary(m.L.top)
+
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+png(file = "./figures/01_Model_Diagnostics/01-04-SizeAggregate-LXL-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.L.top)), residuals(m.L.top, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Size Aggregate (2) - Large-X-Large Model")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+cal3$usid[which(abs(residuals(m.L.top, type = "pearson"))>1.4)]
+# Influential Data
+plot(cooks.distance(m.L.top))
+abline(h = 4/nrow(cal3), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.L.top)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal3$usid[which(cooks.distance(m.L.top) > 3*mean(cooks.distance(m.L.top)))]
+```
+
+Bad Residual pattern. Reject model.
+
+## Aerial Only
+```{r}
+cal4 <- cal3 %>% 
+  filter(lpe_method == "Aerial") %>% 
+  mutate(lnlpe.sc = (lnlpe - mean(lnlpe))/sd(lnlpe))
+
+cal4 %>% count(water_clarity, size)
+cal3 %>% count(water_clarity, size)
+```
+
+```{r}
+m.LA.global <- glm.nb(hpe ~ lnlpe.sc + water_clarity*lnlpe.sc + size*lnlpe.sc, 
+    data=cal4,  
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+
+summary(m.LA.global)
+
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.LA.global)), residuals(m.LA.global, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Size Aggregate (2) - LXL Model")
+abline(h = 0)
+```
+
+```{r}
+m.dredge <- dredge(m.LA.global, beta = "none", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 3.01)) %>% 
+  dplyr::select(lnlpe.sc:delta, -df, -logLik) %>% 
+  mutate(AICc = round2(AICc, 2),
+         delta = round2(delta, 2))
+
+write.csv(m.dredge, file = "./tables/01_04-SizeAggregate-LXL-Aerial.csv", na = "", row.names = F)
+```
+### Top Model
+```{r}
+m.LA.top <- glm.nb(hpe ~ lnlpe.sc + size*lnlpe.sc, 
+    data=cal4,  
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+
+summary(m.LA.top)
+
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+png(file = "./figures/01_Model_Diagnostics/01-04-SizeAggregate-LXL-Aerial-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.LA.top)), residuals(m.LA.top, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Size Aggregate (2) - LXL Model")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+cal3$usid[which(abs(residuals(m.LA.top, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.LA.top))
+abline(h = 4/nrow(cal3), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.LA.top)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal3$usid[which(cooks.distance(m.LA.top) > 3*mean(cooks.distance(m.LA.top)))]
+
+m.coef <- as.data.frame(summary(m.LA.top)$coefficients)
+m.coef$parameter = row.names(m.coef)
+colnames(m.coef)[2] = "std.error"
+
+ggplot(filter(m.coef, parameter != "(Intercept)"),
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error),
+                width = 0.5) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+
+ggsave("./figures/01_Model_Diagnostics/01-04-SizeAggregate-LXL-Aerial-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.coef <- dplyr::select(m.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) %>% 
+  mutate(cross.zero = ifelse(abs(Estimate) < abs(std.error), "Yes", "No"),
+         Estimate = round2(Estimate, 2),
+         std.error = round2(std.error, 2))
+write.csv(m.coef, file = "./tables/01_04-SizeAggregate-LXL-Aerial-Parameters.csv",
+          row.names = F)
+```
+
+## Leave One Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+saveRDS(m.LA.top, file = "./r_objects/models/LXL_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("LXL_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1,2,3),
+                                 type = c("log","center","scale"),
+                                 transform = c(NA, mean(cal4$lnlpe), sd(cal4$lnlpe))) # note that in the future, may want to re-center and scale using the XLXL Data instead of the whole dataset
+
+spec.out <- spec.out %>% 
+  filter(model != "LXL_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+```{r}
+model = m.LA.top
+for(i in 1:nrow(cal4)){
+    m.temp <- glm.nb(as.character(model$call)[2],
+                     data=cal4[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+    p.temp <- predict(m.temp, type="link", cal4[i, ], se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = cal4$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                        calibrated.estimate = exp(p.temp$fit)))
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal4,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 2)
+
+```
+
+# Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_LXL_Data_Model.rds")
+```
+
+# 5
+# Analysis - System Type - Specific
+```{r}
+(cal.fil.5 <- count(cal, gazetted_stream_name, lpe_method) %>% 
+  filter(n>5) %>% 
+  mutate(filter5 = paste0(gazetted_stream_name, "_", lpe_method)))
+
+cal5 <- cal %>% 
+  mutate(filter5 = paste0(gazetted_stream_name, "_", lpe_method)) %>% 
+  filter(filter5 %in% cal.fil.5$filter5)
+
+cal5 %>% 
+  ggplot(aes(x = lnlpe, y = log(hpe),
+             colour = filter5)) +
+  geom_point()
+```
+
+## Individual Model
+```{r}
+p.list <- list() # list for plots
+
+for(k in 1:nrow(cal.fil.5)){
+  print(cal.fil.5$filter5[k])
+  # make temp data with just one system
+  cal5.temp <- filter(cal5, filter5 == cal.fil.5$filter5[k])
+  # make temp model with just one system
+  m.temp <- glm.nb(hpe ~ lnlpe, 
+    data=cal5.temp,  
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+  
+  print("Outliers")
+  print(cal5.temp$usid[which(abs(residuals(m.temp, type = "pearson"))>3)])
+  print("High-leverage")
+  print(cal5.temp$usid[which(cooks.distance(m.temp) > 3*mean(cooks.distance(m.temp)))])
+  
+        # Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+      png(file = paste0("./figures/01_Model_Diagnostics/01-04-Individual-", 
+                        cal5.temp$gazetted_stream_name[1], "-", 
+                        cal5.temp$lpe_method[1],"-Residuals.png"),
+    height = 5, width = 5, units = "in", res = 96)
+     plot(log(fitted(m.temp)), residuals(m.temp, type = "pearson"),
+           xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+           main = paste0("Individual (5) ", cal5.temp$gazetted_stream_name[1], 
+                         "-", cal5.temp$lpe_method[1], " Model"))
+      abline(h = 0)
+      dev.off()
+  
+      p.temp <- broom::augment(m.temp)
+      p.list[[k]] <- ggplot(p.temp, aes(x = .fitted, y = .std.resid)) + 
+        geom_point(pch = 1, size = 2) +
+        geom_hline(yintercept = 0) +
+        labs(x = "ln(Fitted Values)", y = "Pearson Residuals",
+           title = paste0(cal5.temp$gazetted_stream_name[1], 
+                         "-", cal5.temp$lpe_method[1])) + 
+        theme(plot.title = element_text(size=11))
+      
+  # model test dataframe
+  model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric())
+
+  saveRDS(m.temp, file = paste0("./r_objects/models/", cal.fil.5$filter5[k], "-Individual_Data_Model.rds"))
+  
+    model = m.temp
+    
+    for(i in 1:nrow(cal5.temp)){
+      m.temp <- glm.nb(as.character(model$call)[2],
+                     data=cal5.temp[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+      
+      p.temp <- predict(m.temp, type="link", cal5.temp[i, ], se.fit=T)
+      model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = cal5.temp$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                        calibrated.estimate = exp(p.temp$fit)))
+  }
+  model.rank.temp <- left_join(model.test, 
+                        dplyr::select(cal5.temp,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+    mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 5)
+  
+  if(k == 1) model.rank = model.rank.temp
+  if(k != 1) model.rank = rbind(model.rank, model.rank.temp)
+}
+
+wrap_plots(p.list, ncol = 3) +
+  plot_layout(guides = "collect",
+              axes = "collect")
+
+ggsave("./figures/01_Model_Diagnostics/01-04-Individual-Data_Model-ALL.png",
+       height = 9, width = 8, dpi = 96)
+```
+
+# Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Individual_Data_Model.rds")
+```
+
+```{r}
+specifications_out <- data.frame(model = c("Individual_Data_Model"),
+                                 target = c("lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA)) 
+
+spec.out <- spec.out %>% 
+  filter(model != "Individual_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+
+```
+

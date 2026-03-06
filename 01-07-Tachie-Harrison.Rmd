@@ -1,0 +1,562 @@
+---
+title: "01-07-Tachie-Harrison-Specific"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(MASS) # boxcox
+library(lme4) # generalized linear regressions
+library(MuMIn) # dredge
+library(PerformanceAnalytics) # correlation figure
+library(car)       # for vif()
+library(patchwork) # for multi plot ggplot graphs
+library(tidyhydat) # hy_daily for hydrometric data
+```
+
+## Functions
+```{r}
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+## Data
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+```
+
+## Specifications FILE
+```{r}
+modout <- "./r_objects/models/model_specifications.rds"
+spec.out <- readRDS(modout)
+```
+
+## Base Plots
+https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+```{r colour pallet}
+size.cols = c("#E69F00", # Large
+              "#56B4E9", # Medium (including the smalls)
+              "#D55E00", # V. Small
+              "#CC79A7") # X-Large
+```
+
+# Harrison Specific
+```{r}
+har <- cal %>% filter(gazetted_stream_name == "Harrison River")
+```
+
+```{r}
+har.flow <- hy_daily_flows(station_number = "08MG013") # from ec_comments
+
+har.flow <- har.flow %>% 
+  mutate(Year = as.numeric(format(as.Date(Date, format="%Y/%m/%d"),"%Y")), # change to date
+         JDay = lubridate::yday(Date)) %>% # create a Julian Day
+  filter(!is.na(Value)) %>% # remove missing values
+  group_by(Year) %>% # want t count per year
+  mutate(records = n()) %>% 
+  ungroup() %>% # ungroup
+  mutate(complete = records >= 364) %>% # is the total days in the year >= a year?
+  filter(complete == TRUE) # only keep the full years.
+
+# average flow per Julian Day for last 20 years
+har.flow.summary <- har.flow %>% 
+  filter(Year >= max(har.flow$Year)-20) %>% 
+  group_by(JDay) %>% 
+  summarise(average = mean(Value),
+            p10 = quantile(Value, 0.10),
+            p25 = quantile(Value, 0.25),
+            p50 = quantile(Value, 0.50),
+            p75 = quantile(Value, 0.75),
+            p90 = quantile(Value, 0.90))
+```
+
+```{r}
+har$water_discharge <- har.flow$Value[har.flow$Date %in% as.Date(har$lpe_date)]
+
+# Nov  8 - Nov 16 - range of Summer Peak Spawn dates from 2023 Prelim for Harrison
+har.mean = mean(har.flow.summary$average[har.flow.summary$JDay %in% c(313:351)])
+har.sd = sd(har.flow.summary$average[har.flow.summary$JDay %in% c(313:351)])
+
+mean(har$water_discharge)
+sd(har$water_discharge)
+
+har <- har %>% 
+  mutate(lpe.sc = scale(lpe, center=T, scale=T)[,1],
+         lnlpe = log(lpe),
+         lnlpe.sc = scale(lnlpe, center=T, scale=T)[,1],
+         discharge.sc = (water_discharge-har.mean)/har.sd)
+```
+
+```{r}
+ggplot(har.flow.summary,
+       aes(x = JDay, y = average)) +
+  geom_line(colour = "blue") +
+  geom_line(aes(y = p10)) +
+  geom_line(aes(y = p90)) +
+  geom_vline(xintercept = c(313, 351)) + # Nov  8 - Nov 16 - range of Summer Peak Spawn dates from 2023 Prelim for Harrison
+  geom_point(data = har,
+             aes(x = lubridate::yday(lpe_date),
+                 y = water_discharge))
+```
+
+```{r}
+ggplot(har,
+       aes(x = lnlpe.sc, y = log(hpe),
+           colour = discharge.sc)) +
+  geom_point()
+```
+
+## Global Model
+### Covariate Selection
+#### Correlation Coefficients
+Selecting complete cases and excluding ones that are uniform (e.g. substrate shade)
+```{r correlation figure}
+har.cor <- round2(cor(dplyr::select(har, water_clarity_recode, 
+                 bankfull_recode, brightness_recode, cc_recode, fish_vis_recode,
+                 water_vis_recode, discharge.sc, lnlpe.sc)), 3)
+har.cor
+
+chart.Correlation(dplyr::select(har, water_clarity_recode, 
+                 bankfull_recode, brightness_recode, cc_recode, fish_vis_recode,
+                 water_vis_recode, discharge.sc, lnlpe.sc), 
+                  histogram = TRUE, method = "pearson")
+```
+Only Brightness and Cloud Cover have a very high correlation 0.98
+A handful have a correlation of >0.5 but < 0.6.
+fish_vis has 2 > 0.5, water clarity and lpe
+water_clarity is also 0.5 with lpe
+
+But there are only 10 data points, so need to pare down to start even.
+Global Model did not work with 7 covariates.
+Primary interests from an observer interaction perspective are:
+lpe
+dishcharge
+water_clarity
+brightness
+
+dropping:
+bankfull
+fish_vis and cloud cover and water visibility
+
+fish_vis is a little more subjective than brightness.
+flip-flopping between which to test between the two.
+brightness was not correlated with lpe, so chosing it for now.
+```{r}
+m.global <- glm.nb(hpe ~ lnlpe.sc*discharge.sc + lnlpe.sc*water_clarity  + 
+                     lnlpe.sc*brightness, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=har,
+                   link="log")
+# glm.nb default negative binomial family is neg binom 2
+
+# Model Checking
+# plot(log(fitted(m.global)), residuals(m.global, type = "response")) # uninformative
+# https://www.sfu.ca/sasdoc/sashtml/insight/chap39/sect56.htm
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.global)), residuals(m.global, type = "pearson"))
+# there are a couple high residuals
+plot(log(fitted(m.global)), sqrt(abs(residuals(m.global, type = "pearson"))))
+# Influential Data
+plot(cooks.distance(m.global))
+abline(h = 4/nrow(har), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.global)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+har$usid[which(cooks.distance(m.global) == max(cooks.distance(m.global)))]
+har$usid[which(cooks.distance(m.global) > 3*mean(cooks.distance(m.global)))]
+# Model Summary
+summary(m.global)
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical variables:
+https://statisticalhorizons.com/multicollinearity/
+```{r}
+vif(m.global)
+```
+
+Summary:
+nothing stands out RE VIF
+### Dredge
+```{r}
+m.dredge.global <- dredge(m.global, beta = "none", rank = "AICc")
+m.dredge.global
+```
+
+Only 1 model under 4 detla AICc
+Only Includes lnlpe.sc
+
+That is the same model as the "Individual" model.
+Thus, I will not repeat it.
+
+# Tachie Specific
+```{r}
+tach <- cal %>% filter(gazetted_stream_name == "Tachie River")
+```
+
+```{r}
+tach.flow <- hy_daily_flows(station_number = tach$ec_station_number[3]) # from ec_comments
+
+tach.flow <- tach.flow %>% 
+  mutate(Year = as.numeric(format(as.Date(Date, format="%Y/%m/%d"),"%Y")), # change to date
+         JDay = lubridate::yday(Date)) %>% # create a Julian Day
+  filter(!is.na(Value)) %>% # remove missing values
+  group_by(Year) %>% # want t count per year
+  mutate(records = n()) %>% 
+  ungroup() %>% # ungroup
+  mutate(complete = records >= 364) %>% # is the total days in the year >= a year?
+  filter(complete == TRUE) # only keep the full years.
+
+# average flow per Julian Day for last 20 years
+tach.flow.summary <- tach.flow %>% 
+  filter(Year >= max(tach.flow$Year)-20) %>% 
+  group_by(JDay) %>% 
+  summarise(average = mean(Value),
+            p10 = quantile(Value, 0.10),
+            p25 = quantile(Value, 0.25),
+            p50 = quantile(Value, 0.50),
+            p75 = quantile(Value, 0.75),
+            p90 = quantile(Value, 0.90))
+```
+
+```{r}
+tach$water_discharge <- tach.flow$Value[tach.flow$Date %in% as.Date(tach$lpe_date)]
+
+# Sep  7 - Sep 30 - range of Summer Peak Spawn dates from 2023 Prelim for Tachie
+pstrt <- 251
+pend <- 274
+tach.mean = mean(tach.flow.summary$average[tach.flow.summary$JDay %in% c(pstrt:pend)])
+tach.sd = sd(tach.flow.summary$average[tach.flow.summary$JDay %in% c(pstrt:pend)])
+
+mean(tach$water_discharge)
+sd(tach$water_discharge)
+
+tach <- tach %>% 
+  mutate(lpe.sc = scale(lpe, center=T, scale=T)[,1],
+         lnlpe = log(lpe),
+         lnlpe.sc = scale(lnlpe, center=T, scale=T)[,1],
+         discharge.sc = (water_discharge-tach.mean)/tach.sd)
+```
+
+```{r}
+ggplot(tach.flow.summary,
+       aes(x = JDay, y = average)) +
+  geom_line(colour = "blue") +
+  geom_line(aes(y = p10)) +
+  geom_line(aes(y = p90)) +
+  geom_vline(xintercept = c(pstrt, pend)) +
+  geom_point(data = tach,
+             aes(x = lubridate::yday(lpe_date),
+                 y = water_discharge))
+```
+
+```{r}
+ggplot(tach,
+       aes(x = lnlpe, y = log(hpe),
+           colour = discharge.sc)) +
+  geom_point()
+```
+
+## Global Model
+### Covariate Selection
+#### Correlation Coefficients
+Selecting complete cases and excluding ones that are uniform (e.g. substrate shade)
+```{r correlation figure}
+tach.cor <- round2(cor(dplyr::select(tach, 
+                 brightness_recode, cc_recode, fish_vis_recode,
+                 discharge.sc, lnlpe.sc)), 3)
+tach.cor
+
+chart.Correlation(dplyr::select(tach, 
+                 brightness_recode, cc_recode, fish_vis_recode,
+                 discharge.sc, lnlpe.sc), 
+                  histogram = TRUE, method = "pearson")
+```
+Only Brightness and Cloud Cover have a very high correlation 0.98
+Both Brightness and Cloud Cover are correlated (randomly?) with discharge and cc with fish vis
+Fish vis and discharge are not correlated.
+
+Reducing to only include:
+Fish Vis
+Discharge
+Lpe
+```{r}
+m.global <- glm.nb(hpe ~ lnlpe.sc*discharge.sc + lnlpe.sc*fish_vis, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=tach,
+                   link="log")
+# glm.nb default negative binomial family is neg binom 2
+
+# Model Checking
+# plot(log(fitted(m.global)), residuals(m.global, type = "response")) # uninformative
+# https://www.sfu.ca/sasdoc/sashtml/insight/chap39/sect56.htm
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.global)), residuals(m.global, type = "pearson"))
+# there are a couple high residuals
+plot(log(fitted(m.global)), sqrt(abs(residuals(m.global, type = "pearson"))))
+# Influential Data
+plot(cooks.distance(m.global))
+abline(h = 4/nrow(tach), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.global)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+tach$usid[which(cooks.distance(m.global) == max(cooks.distance(m.global)))]
+tach$usid[which(cooks.distance(m.global) > 3*mean(cooks.distance(m.global)))]
+# Model Summary
+summary(m.global)
+
+m.global.no.interaction <- glm.nb(hpe ~ lnlpe.sc + discharge.sc + fish_vis, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=tach,
+                   link="log")
+# glm.nb default negative binomial family is neg binom 2
+
+# Plotting the Coefficients
+m.global.coef <- as.data.frame(summary(m.global)$coefficients)
+m.global.coef$parameter = row.names(m.global.coef)
+colnames(m.global.coef)[2] = "std.error"
+
+ggplot(m.global.coef,
+       aes(x = parameter, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical variables:
+https://statisticalhorizons.com/multicollinearity/
+```{r}
+vif(m.global)
+vif(m.global.no.interaction)
+```
+
+Summary:
+nothing stands out RE VIF
+
+### Dredge
+```{r}
+m.dredge.global <- dredge(m.global, beta = "none", rank = "AICc")
+m.dredge.global
+```
+
+Only 1 model under 4 detla AICc
+Only Includes lnlpe.sc
+
+That is the same model as the "Individual" model.
+Thus, it will not be saved as a new model to try.
+
+## Ratio Model
+```{r}
+ggplot(tach,
+       aes(y = log(hpe)/lnlpe, x = discharge.sc,
+           colour = fish_vis,
+           shape = brightness)) +
+  geom_point()
+
+ggplot(tach,
+       aes(y = hpe/lpe, x = discharge.sc,
+           colour = fish_vis,
+           shape = brightness)) +
+  geom_point()
+
+ggplot(tach,
+       aes(y = hpe/lpe, x = log(lpe),
+           colour = fish_vis,
+           shape = brightness)) +
+  geom_point()
+
+ggplot(tach,
+       aes(y = log(hpe)/lnlpe, x = log(lpe),
+           colour = fish_vis,
+           shape = brightness)) +
+  geom_point()
+```
+
+
+
+```{r}
+m.global <- lm(log(hpe)/log(lpe) ~ discharge.sc*fish_vis + discharge.sc*brightness, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=tach)
+# glm.nb default negative binomial family is neg binom 2
+
+# Model Checking
+# plot(log(fitted(m.global)), residuals(m.global, type = "response")) # uninformative
+# https://www.sfu.ca/sasdoc/sashtml/insight/chap39/sect56.htm
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.global)), residuals(m.global, type = "pearson"))
+# there are a couple high residuals
+plot(log(fitted(m.global)), sqrt(abs(residuals(m.global, type = "pearson"))))
+# Influential Data
+plot(cooks.distance(m.global))
+abline(h = 4/nrow(tach), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.global)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+which(cooks.distance(m.global) == max(cooks.distance(m.global)))
+tach$usid[which(cooks.distance(m.global) > 3*mean(cooks.distance(m.global)))]
+# Model Summary
+summary(m.global)
+
+m.global.no.interaction <- lm(log(hpe)/log(lpe) ~ discharge.sc + fish_vis + brightness, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=tach)
+# glm.nb default negative binomial family is neg binom 2
+
+# Plotting the Coefficients
+m.global.coef <- as.data.frame(summary(m.global)$coefficients)
+m.global.coef$parameter = row.names(m.global.coef)
+colnames(m.global.coef)[2] = "std.error"
+
+ggplot(m.global.coef,
+       aes(x = parameter, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical variables:
+https://statisticalhorizons.com/multicollinearity/
+```{r}
+vif(m.global)
+vif(m.global.no.interaction)
+```
+
+Summary:
+nothing stands out RE VIF
+
+### Dredge
+```{r}
+m.dredge.global <- dredge(m.global, beta = "none", rank = "AICc")
+m.dredge.global
+```
+
+Most parsimonious is Intercept Only model.
+One Model within 4 AICc, includes discharge.
+### Model Averaged
+```{r}
+ma.global = model.avg(m.dredge.global, subset = delta < 4, fit = TRUE)
+```
+May test if this is better than individual.
+
+# Harrison + Tachie
+```{r}
+combo <- rbind(har, tach)
+```
+
+```{r}
+ggplot(combo,
+       aes(x = lnlpe.sc, y = log(hpe),
+           colour = discharge.sc)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+ggplot(combo,
+       aes(x = lpe, y = hpe,
+           colour = discharge.sc)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+hist(combo$discharge.sc)
+```
+
+## Global Model
+### Covariate Selection
+#### Correlation Coefficients
+Selecting complete cases and excluding ones that are uniform (e.g. substrate shade)
+```{r correlation figure}
+combo.cor <- round2(cor(dplyr::select(combo, water_clarity_recode,
+                 brightness_recode, cc_recode, fish_vis_recode,
+                 discharge.sc, lnlpe.sc)), 3)
+combo.cor
+
+chart.Correlation(dplyr::select(combo, water_clarity_recode,
+                 brightness_recode, cc_recode, fish_vis_recode,
+                 discharge.sc, lnlpe.sc), 
+                  histogram = TRUE, method = "pearson")
+```
+Only Brightness and Cloud Cover have a very high correlation 0.98
+
+
+```{r}
+m.global.vis <- glm.nb(hpe ~ lnlpe.sc*discharge.sc + lnlpe.sc*fish_vis, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=tach,
+                   link="log")
+# glm.nb default negative binomial family is neg binom 2
+
+# Model Checking
+# plot(log(fitted(m.global)), residuals(m.global, type = "response")) # uninformative
+# https://www.sfu.ca/sasdoc/sashtml/insight/chap39/sect56.htm
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.global.vis)), residuals(m.global.vis, type = "pearson"))
+# there are a couple high residuals
+plot(log(fitted(m.global.vis)), sqrt(abs(residuals(m.global.vis, type = "pearson"))))
+# Influential Data
+plot(cooks.distance(m.global.vis))
+abline(h = 4/nrow(combo), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.global.vis)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+which(cooks.distance(m.global.vis) == max(cooks.distance(m.global.vis)))
+combo$usid[which(cooks.distance(m.global.vis) > 3*mean(cooks.distance(m.global.vis)))]
+# Model Summary
+summary(m.global.vis)
+
+m.global.bright <- glm.nb(hpe ~ lnlpe.sc*discharge.sc + 
+                     lnlpe.sc*brightness, 
+                   na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                   data=tach,
+                   link="log")
+# glm.nb default negative binomial family is neg binom 2
+
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot(log(fitted(m.global.bright)), residuals(m.global.bright, type = "pearson"))
+# there are a couple high residuals
+plot(log(fitted(m.global.bright)), sqrt(abs(residuals(m.global.bright, type = "pearson"))))
+# Influential Data
+plot(cooks.distance(m.global.bright))
+abline(h = 4/nrow(combo), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.global.bright)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+which(cooks.distance(m.global.bright) == max(cooks.distance(m.global.bright)))
+combo$usid[which(cooks.distance(m.global.bright) > 3*mean(cooks.distance(m.global.bright)))]
+# Model Summary
+summary(m.global.bright)
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical variables:
+https://statisticalhorizons.com/multicollinearity/
+```{r}
+vif(m.global.vis)
+vif(m.global.bright)
+```
+
+Summary:
+Interaction terms - ignoring.
+
+### Dredge
+```{r}
+m.dredge.vis <- dredge(m.global.vis, beta = "none", rank = "AICc")
+m.dredge.vis
+
+m.dredge.bright <- dredge(m.global.bright, beta = "none", rank = "AICc")
+m.dredge.bright
+```
+
+only models < 4 AICc are those with only lpe as the predictor.

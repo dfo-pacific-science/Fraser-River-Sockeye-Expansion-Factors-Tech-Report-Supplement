@@ -1,0 +1,24 @@
+"Set","Size","Method","Water.Clarity","Expansion.Factor","Standard.Error","Sample.Size","average","CV"
+"Size-Aggregate (2)","Large-X-Large","Aerial",NA,1.139,0.081,30,11.57,8.1
+"Size-Aggregate (2)","Large-X-Large","Ground",NA,1.102,0.044,8,12.44,4.4
+"Size-Aggregate (2)","Small-Medium","Aerial",NA,1.093,0.043,39,11.01,4.3
+"Size-Aggregate (2)","Small-Medium","Ground",NA,1.064,0.031,85,9.38,3.1
+"Specialized (6)","Early Stuart",NA,NA,1.063,0.029,51,8.37,2.9
+"Individual (5)","Forfar Creek",NA,NA,1.063,0.026,17,8.51,2.6
+"Individual (5)","Gluske Creek",NA,NA,1.063,0.028,18,8,2.8
+"Individual (5)","O' Ne-Ell Creek",NA,NA,1.062,0.032,13,8.84,3.2
+"Generalized (1)","All","Aerial",NA,1.113,0.065,69,11.26,6.5
+"Generalized (1)","All","Ground",NA,1.068,0.035,93,9.64,3.5
+"Generalized (1)","All","Both",NA,1.089,0.056,162,10.33,5.6
+"Size (3)","Large","Ground",NA,1.105,0.047,7,12.53,4.7
+"Size (3)","Medium","Aerial",NA,1.092,0.043,38,11.01,4.3
+"Size (3)","Medium","Ground",NA,1.062,0.031,27,11.23,3.1
+"Size (3)","Small","Ground",NA,1.065,0.031,58,8.51,3.1
+"Size (3)","X-Large","Aerial",NA,1.134,0.081,27,11.54,8.1
+"Size-Clarity (4)","Large","Ground","Clear",1.105,0.047,7,12.53,4.7
+"Size-Clarity (4)","Medium","Aerial","Clear",1.076,0.034,25,11.2,3.4
+"Size-Clarity (4)","Medium","Aerial","Pt_Turb_Tannic",1.126,0.044,13,10.64,4.4
+"Size-Clarity (4)","Medium","Ground","Clear",1.06,0.03,25,11.31,3
+"Size-Clarity (4)","Small","Ground","Clear",1.063,0.029,56,8.5,2.9
+"Size-Clarity (4)","X-Large","Aerial","Clear",1.181,0.096,10,11.3,9.6
+"Size-Clarity (4)","X-Large","Aerial","Pt_Turb_Tannic",1.11,0.065,17,11.68,6.5

@@ -1,0 +1,404 @@
+---
+title: "01-05-Early-Stu-Specific"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(MASS) # boxcox - masked from ‘package:dplyr’: select()
+library(lme4) # generalized linear regressions
+# methods(class = "lmerMod") # shows what functionality is available
+library(MuMIn) # dredge
+library(PerformanceAnalytics) # correlation figure
+library(car)       # for vif()
+library(patchwork) # for multi plot ggplot graphs
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+This analysis is based off of an analysis done by Scott Decker.
+Original Summary: Early_Stuart_esc_estimation_issues.docx
+Original Code: Early_Stuart_calibration.R
+
+ground_cuml_carc_above = Cumulative Carcasses up till the max count date.
+ground_carcs_total_above = cumulative carcasses for the whole program.
+
+## Data
+```{r}
+modout <- "./r_objects/models/model_specifications.rds" # for saving specifications later
+spec.out <- readRDS(modout)
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+
+cal <- cal %>% filter(run_timing_group == "Early Stuart", # Early Stuart
+                      lpe_method == "Ground", # Ground Surveys
+                      !is.na(ground_carcs_total_above)) %>%  # Need Total Carcs 
+  mutate(protraction = ground_cuml_carc_above/ground_carcs_total_above, # "First Ratio" in the report
+         deadvlive = ground_carcs_total_above/peak_live_above) # "Second Ratio" in the report
+```
+### Test for Normality
+High precision estimates
+```{r}
+hist(cal$hpe)
+shapiro.test(cal$hpe) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$hpe ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$hpe))
+shapiro.test(log(cal$hpe)) # acceptable
+hist(sqrt(cal$hpe))
+shapiro.test(sqrt(cal$hpe)) # not as good
+hist((cal$hpe)^(1/3))
+shapiro.test((cal$hpe)^(1/3)) # best
+```
+low precision estimates
+```{r}  
+hist(cal$lpe)
+shapiro.test(cal$lpe) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$lpe ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$lpe))
+shapiro.test(log(cal$lpe)) # not very acceptable
+hist(sqrt(cal$lpe))
+shapiro.test(sqrt(cal$lpe)) # better
+hist((cal$lpe)^(1/3))
+shapiro.test((cal$lpe)^(1/3)) # best
+```
+total ground carcs
+```{r}
+hist(cal$ground_carcs_total_above)
+shapiro.test(cal$ground_carcs_total_above) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$ground_carcs_total_above ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$ground_carcs_total_above))
+shapiro.test(log(cal$ground_carcs_total_above)) # not very acceptable
+hist(sqrt(cal$ground_carcs_total_above))
+shapiro.test(sqrt(cal$ground_carcs_total_above)) # not very acceptable
+hist((cal$ground_carcs_total_above)^(1/3))
+shapiro.test((cal$ground_carcs_total_above)^(1/3)) # best
+```
+protration index
+```{r}
+hist(cal$protraction)
+shapiro.test(cal$protraction) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$protraction ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$protraction))
+shapiro.test(log(cal$protraction)) # best
+hist(sqrt(cal$protraction))
+shapiro.test(sqrt(cal$protraction)) # not acceptable
+hist((cal$protraction)^(1/3))
+shapiro.test((cal$protraction)^(1/3)) # ok
+```
+
+dead vs live index
+```{r}
+hist(cal$deadvlive)
+shapiro.test(cal$deadvlive) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$deadvlive ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$deadvlive))
+shapiro.test(log(cal$deadvlive)) # good
+hist(sqrt(cal$deadvlive))
+shapiro.test(sqrt(cal$deadvlive)) # great
+hist((cal$deadvlive)^(1/3))
+shapiro.test((cal$deadvlive)^(1/3)) # best
+```
+
+cube-root transformation does the best job of normalizing most of the E Stu data
+with the exception of the protraction index
+```{r}  
+cal <- cal %>% 
+  mutate(Cubehpe = hpe^(1/3),
+         Cubelpe = lpe^(1/3),
+         CubeTotalCarv = ground_carcs_total_above^(1/3),
+         lnprotract = log(protraction),
+         Cubedeadvlive = deadvlive^(1/3),
+         Cubelpe.sc = scale(Cubelpe, center=T, scale=T)[1:nrow(cal)],
+         CubeTotalCarc.sc = scale(CubeTotalCarv, center=T, scale=T)[1:nrow(cal)],
+         lnprotract.sc = scale(lnprotract, center=T, scale=T)[1:nrow(cal)],
+         Cubedeadvlive.sc = scale(Cubedeadvlive, center=T, scale=T)[1:nrow(cal)])
+```
+### Correlation
+note that multiple variables have only 1 state or low variability:
+size
+stability
+water clarity
+canopy cover
+method
+```{r correlation figure}
+cal.cor <- round(cor(dplyr::select(cal,
+                 substrate_shade_recode, lwd_recode,
+                 Cubelpe.sc, CubeTotalCarc.sc, lnprotract.sc,
+                 Cubedeadvlive.sc)), 3)
+cal.cor
+
+#png(file="figures/E. Stu Sockeye Calibration Correlation Plot.png",
+#    units = "in", width=10, height=5, res = 250)
+
+chart.Correlation(dplyr::select(cal,
+                 substrate_shade_recode, lwd_recode,
+                 Cubelpe.sc, CubeTotalCarc.sc, lnprotract.sc,
+                 Cubedeadvlive.sc), 
+                  histogram = TRUE, method = "pearson")
+#dev.off()
+```
+
+Cubed Total Carc is the most correlated. Removing from analysis.
+
+
+### Covariate Selection
+```{r}
+m.g <- lmer(Cubehpe ~ Cubelpe.sc + Cubedeadvlive.sc + lnprotract.sc +
+              substrate_shade + large_woody_debris + (1|gazetted_stream_name), 
+    data=cal,  
+    #family = gaussian(link = "identity"), # if using glm
+    na.action = "na.fail")
+
+summary(m.g)
+
+plot((fitted(m.g)), residuals(m.g, type = "response"))
+# transforming back to "real"
+plot((fitted(m.g)^3), residuals(m.g, type = "response"))
+
+m.g.coef <- as.data.frame(summary(m.g)$coefficients)
+m.g.coef$parameter = row.names(m.g.coef)
+colnames(m.g.coef)[2] = "std.error"
+
+ggplot(m.g.coef,
+       aes(x = parameter, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+
+# Only lpe and deadvsalive appear to be significant
+
+m.global <- lmer(Cubehpe ~ Cubelpe.sc + 
+                   Cubedeadvlive.sc*Cubelpe.sc + lnprotract.sc*Cubelpe.sc +
+              substrate_shade*Cubelpe.sc + large_woody_debris*Cubelpe.sc + 
+                (1|gazetted_stream_name), 
+    data=cal,  
+    REML = FALSE, # pg 122 of Zuur 2009 - Use ML to compare fixed effects. refit with REML for final parameter estimates.
+    na.action = "na.fail")
+
+summary(m.global)
+```
+
+#### Variance Inflation Factors
+general definition:
+https://online.stat.psu.edu/stat462/node/180/
+on interactions and categorical variables:
+https://statisticalhorizons.com/multicollinearity/
+```{r}
+vif(m.g)
+```
+All below 2, which is "OK". Keep all in global model.
+
+#### Dredge
+```{r}
+m.dredge <- dredge(m.global, beta = "sd", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 4)) %>% 
+  dplyr::select(Cubedeadvlive.sc:delta) %>% 
+  dplyr::select(-df, -logLik)
+
+write.csv(m.dredge, file = "./tables/01_05-EarlyStuart-Specialized.csv", na = "", row.names = F)
+```
+
+Cubedeadvlive interaction is the only one in the top 2.
+
+# Top Model Selection
+```{r}
+m.interact <- lmer(Cubehpe ~ Cubelpe.sc*Cubedeadvlive.sc + (1|gazetted_stream_name), 
+    data=cal,  
+    REML = TRUE,
+    na.action = "na.fail")
+
+png(file = "./figures/01_Model_Diagnostics/01-05-Early-Stuart-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(fitted(m.interact), residuals(m.interact),
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Early Stuart Specialized (6) Model")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+cal$usid[which(abs(residuals(m.interact))>3)]
+# Influential Data
+plot(cooks.distance(m.interact))
+abline(h = 4/nrow(cal), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.interact)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal$usid[which(cooks.distance(m.interact) > 3*mean(cooks.distance(m.interact)))]
+
+summary(m.interact)
+
+m.interact.coef <- as.data.frame(summary(m.interact)$coefficients)
+m.interact.coef$parameter = row.names(m.interact.coef)
+colnames(m.interact.coef)[2] = "std.error"
+
+ggplot(filter(m.interact.coef, parameter != "(Intercept)"),
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error),
+                width = 0.5) +
+  geom_hline(yintercept = 0) +
+  coord_flip() +
+  labs(x = "Parameter")
+
+ggsave("./figures/01_Model_Diagnostics/01-05-EarlyStuart-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.interact.coef <- dplyr::select(m.interact.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) 
+write.csv(m.interact.coef, file = "./tables/01_05-EarlyStuart-Parameters.csv",
+          row.names = F)
+```
+
+# Leave One Out
+https://www.rdocumentation.org/packages/lme4/versions/1.1-23/topics/predict.merMod
+https://stats.stackexchange.com/questions/467543/including-random-effects-in-prediction-with-linear-mixed-model
+https://stats.stackexchange.com/questions/262277/why-would-you-predict-from-a-mixed-effect-model-without-including-random-effects
+```{r}
+dplyr::select(cal[1, ], Cubelpe.sc, Cubedeadvlive.sc, gazetted_stream_name)
+predict(m.interact, type = "response", se.fit = T)
+fitted(m.interact)
+p1 <- predict(m.interact,  
+              newdata = as.data.frame(dplyr::select(cal[1, ], Cubelpe.sc, 
+                                                    Cubedeadvlive.sc)), # not including stream name to remove random effect correction
+              re.form=NA, # this allows for "out of group" data to be used, i.e. from a group not part of the random effect
+              type="response",
+              se.fit = T) # se.fit = F must be used if including the random effect
+p1$fit
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(),
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+models <- list(m.interact)
+
+saveRDS(m.interact, file = "./r_objects/models/Early_Stu_DeadAlive_Model.rds")
+
+specifications_out <- data.frame(model = "Early_Stu_DeadAlive_Model",
+                                 target = c("lpe","lpe","lpe",
+                                            "deadvlive","deadvlive","deadvlive",
+                                            "prediction"),
+                                 order = c(1,2,3,
+                                           1,2,3,
+                                           1),
+                                 type = c("cuberoot","center","scale",
+                                          "cuberoot","center","scale",
+                                          "cube"),
+                                 transform = c(NA, mean(cal$Cubelpe), sd(cal$Cubelpe),
+                                               NA, mean(cal$Cubedeadvlive), sd(cal$Cubedeadvlive),
+                                               NA)) # note that in the future, may want to re-center and scale using the XLONLY Data instead of the whole dataset
+
+
+spec.out <- spec.out %>% 
+  filter(model != "Early_Stu_DeadAlive_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+```{r}
+for(j in 1:length(models)){
+  model = models[[j]]
+  for(i in 1:nrow(cal)){
+    m.temp <- lmer(formula(model),
+                     data=cal[-i, ],
+                     REML = TRUE)
+    p.temp <- predict(m.temp, type="response", cal[i, -7], # -7 is to remove the gazetted_stream_name
+                      re.form=NA, se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(formula(model))[3],
+                                 usid = cal$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = p.temp$fit^3))
+  }
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 6)
+
+```
+### Plots
+```{r plot of absolute percent error by system}
+set.seed(234)
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error,
+             colour = model)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  geom_point(position = "jitter", alpha = 0.5) +
+  coord_flip() +
+  labs(title = "Early Stuart Dead/Alive Model Performance",
+       y = "Absolute percent error", x = "Streams",
+       colour = "Model Types")
+
+#ggsave("figures/Model Performance/02_Model_Performance_Early_Stu_DeadAlive_Model.png",
+#       height = 6, width = 8, dpi = 150)
+```
+
+```{r}
+filter(model.rank,
+       abs.per.error > 0.4)
+```
+
+# Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Early_Stu_DeadAlive_Model.rds")
+```
+
+```{r}
+
+```
+
+# Plots for Presentations
+```{r}
+summary(m.interact)
+
+plot.dat <- expand.grid(
+  lpe = c(0:10000),
+  deadvlive = c(0.25, 0.5, 1, 2)
+) %>% 
+  mutate(Cubelpe = lpe^(1/3),
+         Cubedeadvlive = deadvlive^(1/3),
+         Cubelpe.sc = (Cubelpe - mean(cal$Cubelpe))/sd(cal$Cubelpe),
+         Cubedeadvlive.sc = (Cubedeadvlive - mean(cal$Cubedeadvlive))/sd(cal$Cubedeadvlive))
+
+p.temp <- predict(m.interact, type="response", plot.dat, # -7 is to remove the gazetted_stream_name
+                      re.form=NA, se.fit=T)
+
+plot.dat$fit = p.temp$fit
+
+
+```
+

@@ -1,0 +1,179 @@
+---
+title: "04-04-Calibration-App-Summaries-w-Rules"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(readxl) # read_excel
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # for label_comma()
+library(stringr) # str_extract
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+# Data
+```{r}
+cal.out.all <- readRDS("./r_objects/04_03_2024_Calibration_wDecisionRules.rds")
+cal.out <- filter(cal.out.all, 
+                  estimate_method == "(Peak Live + Cumulative Dead)*Expansion") %>% 
+  mutate(diff = calibrated.estimate - final_estimate,
+                   per.diff = diff / final_estimate,
+                   abs.per.diff = abs(per.diff),
+         per.diff.rsa = (calibrated.estimate-RSA)/RSA)
+glimpse(cal.out)
+
+## Buffer the ranges by 10% ##
+# Method, Size, Clarity
+lpe.ranges.msc <- readRDS("./r_objects/00-Regression_LPE_Ranges_Clarity_Method.rds") %>% 
+  dplyr::select(-n)
+
+# Method Size
+lpe.ranges.ms <- lpe.ranges.msc %>% 
+  group_by(lpe_method, size) %>% 
+  summarize(min10.ms = min(min10),
+            max10.ms = max(max10))
+
+# Method Aggregate
+lpe.ranges.ma <- lpe.ranges.msc %>% 
+  mutate(aggr = case_when(
+    size %in% c("Large", "X-Large") ~ "LXL",
+    size %in% c("Small", "Medium") ~ "SM"
+  )) %>% 
+  group_by(lpe_method, aggr) %>% 
+  summarize(min10.ma = min(min10),
+            max10.ma = max(max10))
+
+# Method
+lpe.ranges.m <- lpe.ranges.msc %>% 
+  group_by(lpe_method) %>% 
+  summarize(min10.m = min(min10),
+            max10.m = max(max10))
+
+# Merge ranges onto cal.out
+# For out of sample pairs, add a number.
+cal.out <- cal.out %>% 
+  left_join(., lpe.ranges.msc) %>% 
+  left_join(., lpe.ranges.ms) %>% 
+  left_join(., lpe.ranges.ma) %>% 
+  left_join(., lpe.ranges.m)
+
+```
+## Summaries
+### Totals
+```{r}
+# Default Application
+sum(cal.out$final_estimate)
+# RSA
+sum(cal.out$RSA)
+
+# Percent Change between default and RSA
+(sum(cal.out$RSA) -sum(cal.out$final_estimate) ) / sum(cal.out$final_estimate)
+
+# Updated Calibration
+sum(cal.out$calibrated.estimate)
+
+# Percent Change between default and calibrated
+(sum(cal.out$calibrated.estimate) -sum(cal.out$final_estimate) ) / sum(cal.out$final_estimate)
+
+# Percent Change between RSA and calibrated
+(sum(cal.out$calibrated.estimate) -sum(cal.out$RSA) ) / sum(cal.out$RSA)
+
+sum(cal.out$calibrated.estimate) / sum(cal.out$final_estimate)
+
+# Percent change per CU
+cal.out %>% 
+  group_by(CU) %>% 
+  summarise(calibrated.estimate = sum(calibrated.estimate),
+            default = sum(default),
+            RSA = sum(RSA)) %>% 
+  mutate(per.diff = (calibrated.estimate - RSA) / RSA * 100) %>% 
+  print(n = 25)
+```
+
+## Larger, Smaller
+```{r}
+# False is calibrated is larger, TRUE is Calibrated is smaller
+count(cal.out, calibrated.estimate < final_estimate)
+
+# average percent difference
+summary(cal.out$per.diff)
+# average percent difference to RSA
+summary(cal.out$per.diff.rsa)
+
+# outliers
+cal.out  %>%
+  filter(abs.per.diff > 0.5) %>% 
+  count(size, lpe_method, water_clarity, calibration.model)
+```
+
+
+### Within Training Set?
+```{r}
+# By Method
+cal.out %>% 
+  mutate(below = ifelse(lpe < min10.m, 1, 0),
+         above = ifelse(lpe > max10.m, 1, 0)) %>% 
+  group_by(lpe_method) %>% 
+  summarise(n = n(),
+            below = sum(below),
+            above = sum(above)) %>% 
+  mutate(prop = below / n) %>% 
+  print() %>% 
+  summarise(n = sum(n),
+            below = sum(below)) %>% 
+  mutate(propr = below / n)
+
+# By Method-Aggregate
+cal.out %>% 
+  mutate(below = ifelse(lpe < min10.ma, 1, 0),
+         above = ifelse(lpe > max10.ma, 1, 0)) %>% 
+  group_by(lpe_method, aggr) %>% 
+  summarise(n = n(),
+            below = sum(below),
+            above = sum(above)) %>% 
+  mutate(prop = below / n) %>% 
+  print() %>% 
+  ungroup() %>% 
+  summarise(n = sum(n),
+            below = sum(below)) %>% 
+  mutate(propr = below / n)
+
+# By Method-Size
+cal.out %>% 
+  mutate(below = ifelse(lpe < min10.ms, 1, 0),
+         above = ifelse(lpe > max10.ms, 1, 0)) %>% 
+  group_by(lpe_method, size) %>% 
+  summarise(n = n(),
+            below = sum(below),
+            above = sum(above)) %>% 
+  mutate(prop = below / n) %>% 
+  print() %>% 
+  ungroup() %>% 
+  summarise(n = sum(n),
+            below = sum(below)) %>% 
+  mutate(propr = below / n)
+
+# By Method-Size-Clarity
+# First check for the number that don't have a match at all
+count(cal.out, min10)
+# Regular stats on remaining estimates
+cal.out %>% 
+  filter(!is.na(min10)) %>% # remove the 4 estimates with match
+  mutate(below = ifelse(lpe < min10, 1, 0)) %>% 
+  group_by(lpe_method, size, water_clarity) %>% 
+  summarise(n = n(),
+            below = sum(below)) %>% 
+  mutate(prop = below / n) %>% 
+  print() %>% 
+  ungroup() %>% 
+  summarise(n = sum(n),
+            below = sum(below)) %>% 
+  mutate(propr = below / n)
+```
+

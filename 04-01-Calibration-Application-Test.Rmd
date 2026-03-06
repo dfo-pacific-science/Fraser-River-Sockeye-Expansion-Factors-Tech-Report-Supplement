@@ -1,0 +1,196 @@
+---
+title: "04-01-Calibration-Application-Test"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+#rm(list = ls())
+library(readxl) # read_excel
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # for label_comma()
+library(stringr) # str_extract
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+library(tidyhydat) # hy_daily for hydrometric data
+cal_4apply <- readRDS("./r_objects/03_cal_4apply.rds")
+mods <- readRDS("./r_objects/03_mods.rds")
+mod.spec.fn <- readRDS("./r_objects/03_mod_spec_fn.rds")
+mod.specs <- readRDS("./r_objects/models/model_specifications.rds")
+```
+
+# Data
+# Model Selection Results
+Reading in the model selection results.
+```{r}
+mod.selection <- readRDS(file = "./r_objects/02_01_rank_top_results.rds")
+mod.selection <- filter(mod.selection,
+                        keep == TRUE)
+lpe.ranges <- readRDS("./r_objects/00-Regression_LPE_Ranges.rds")
+```
+
+## Data
+```{r}
+cal.input <-read_excel("./data/calibration_input_2024.xlsx", sheet="Calibration_Input",
+                     na = c("", "NA"))   
+glimpse(cal.input)
+
+ec.stations <- read.csv("./data/ec_stations_clean.csv")
+glimpse(ec.stations)
+```
+
+### Cleaning and Joining
+```{r}
+# re-labelling water clarities to only two bins
+# # re-labelling Very Small to Small.
+cal.input <- cal.input %>% 
+  mutate(lpe_method = case_when(
+    lpe_method %in% c("Aerial", "Ground") ~ lpe_method,
+    !lpe_method %in% c("Aerial", "Ground") ~ "Ground"
+  ),
+         lpe = case_when(
+    lpe_method=="Aerial" & !is.na(aerial_unsexed_above) ~ peak_live_above + 
+      aerial_unsexed_above,
+    lpe_method=="Aerial" & is.na(aerial_unsexed_above) ~ peak_live_above,
+    lpe_method=="Ground" & !is.na(ground_cuml_carc_above) ~ peak_live_above + 
+      ground_cuml_carc_above,
+    lpe_method=="Ground" & is.na(ground_cuml_carc_above) ~ peak_live_above
+    ),
+    water_clarity = 
+           ifelse(water_clarity == "Clear", "Clear", "Pt_Turb_Tannic"),
+         size = as.character(size),
+         size = 
+           ifelse(size == "V. Small", "Small", size),
+         size = as.factor(size),
+  substrate_shade = as.factor(substrate_shade),
+         aggr = ifelse(size %in% c("Large", "X-Large"), "LXL", "SM")) %>% 
+  left_join(., ec.stations)
+```
+
+#### Discharge
+```{r}
+cal.flow <- hy_daily_flows(station_number = ec.stations$ec_station_number,
+                           start_date = "2024-01-01") %>% 
+  rename(lpe_date = Date, ec_station_number = STATION_NUMBER)
+
+cal.input %>% 
+  dplyr::select(lpe_date, gazetted_stream_name, ec_station_number) %>% 
+  filter(!is.na(ec_station_number)) %>% 
+  left_join(., cal.flow)
+# If any Flows are NA - then need to look them up manually because they haven't been uploaded to the database yet.
+# https://wateroffice.ec.gc.ca/mainmenu/real_time_data_index_e.html
+ 
+cal.input <- cal.input %>% 
+  left_join(., cal.flow) %>% 
+  mutate(water_discharge = Value)
+```
+
+```{r}
+# making an output dataframe for the resulting calibrated estimates
+cal.out <- dplyr::select(cal.input,
+                         watershed_group:year,size,aggr, lpe_method, 
+                         water_clarity, substrate_shade, lpe, estimate_method:RSA_reason) %>% 
+  mutate(default = lpe*1.8,
+         calibration.model = NA,
+         fit = NA, 
+         se.fit = NA,
+         fit.cv = NA,
+         calibrated.se.lower = NA,
+         calibrated.se.upper = NA,
+         calibrated.estimate = NA)
+```
+
+## Model Application
+```{r}
+# for each row in the data that needs calibrating
+for(i in 1:nrow(cal.input)){
+  cal.lp <- cal.input[i, ] # pull out the first row
+  # lp == loop
+  lp.method <- as.character(cal.lp$lpe_method) # identify its survey method
+  lp.sys <- cal.lp$gazetted_stream_name
+  lp.size = as.character(cal.lp$size)
+  lp.agg <- ifelse(lp.size %in% c("Large", "X-Large"), "LXL", "SM") # is the system X-Large?
+  lp.size.clarity <- paste0(lp.size, "_", cal.lp$water_clarity)
+  lp.system.method = paste0(cal.lp$gazetted_stream_name, "_", lp.method)
+  
+  # pulling out the various models that may be applied to the system
+  mod.lp <- mod.selection %>% 
+    filter(rank.method == lp.method,
+           rank.filter %in% c(lp.sys,
+                              lp.size.clarity,
+                              lp.size,
+                              lp.agg,
+                              "All")) %>% 
+    arrange(desc(special.level)) # arranged from highest to lowest
+  # note that there will be multiple models in most cases.
+  # The following code sets up a loop to apply each model starting with the
+  # highest ranked model. Once a result is produced, the loop stops trying to
+  # apply the subsequent models. i.e. the "most specialized" model is applied
+  # and the more general models are only applied if a covariate is missing to be
+  # used with the more specialized models
+  
+  result.flag = TRUE # resetting result.flag for each estimate prior entering the next loop
+  
+  for(j in 1:nrow(mod.lp)){# start of j loop
+    if(result.flag == TRUE){ # start of result.flag statement 1
+      top.model.name <- mod.lp$top.model[j]
+      is.individual <- str_detect(top.model.name, "Individual")
+      
+      # if it is the individual model, need to select which individual model it is in addition to the data
+     if(is.individual == TRUE){
+       ## NOTE - all these try and tests really slow things down unfortunetly
+      test <- try(mod.spec.fn[[top.model.name]](cal.lp, lp.system.method), silent = T) # test if the model can be applied
+      if('try-error' %in% class(test)) { # if there is an error then
+        result.flag = TRUE # ping the result flag, which will trigger running the next iteration of the j loop
+      } else { # if it is not an error, then the model will run
+          cal.lp = mod.spec.fn[[top.model.name]](cal.lp, lp.system.method)
+        } # end of is.individual test
+      } else { # just need to select the data if it is not an individual model
+        test <- try(mod.spec.fn[[top.model.name]](cal.lp), silent = T) # test if the model can be applied
+        if('try-error' %in% class(test)) { # if there is an error then
+        result.flag = TRUE # ping the result flag, which will trigger running the next iteration of the j loop
+      } else { # if it is not an error, then the model will run
+          cal.lp = mod.spec.fn[[top.model.name]](cal.lp)
+        } # end of 2nd test
+    } # end of model application
+    # check if the fit produced a result, possibly not due to not having all of the covariates
+      if("fit" %in% names(cal.lp)) { # if a fit was produced, then a new column named fit will exist
+        result.flag = ifelse(is.na(cal.lp$fit), TRUE, FALSE) # the result flag only is turned off if fit is also not NA
+      } else {
+          result.flag = TRUE # otherwise, the result flag stays on
+          }
+    # if result.flag == FALSE, then an estimate was produced.
+    if(result.flag == FALSE) { # start of result.flag statement 2
+      cal.out$calibration.model[i] = top.model.name
+      cal.out$fit[i] = cal.lp$fit
+      cal.out$se.fit[i] = cal.lp$se.fit
+      cal.out$fit.cv[i] = cal.lp$fit.cv
+      cal.out$calibrated.se.lower[i] = cal.lp$calibrated.se.lower
+      cal.out$calibrated.se.upper[i] = cal.lp$calibrated.se.upper
+      cal.out$calibrated.estimate[i] = cal.lp$calibrated.estimate
+      } # end of result.flag statement 2
+    }# end of result.flag statement 1
+  }# end of j loop for nrow(mod.lp)
+  print(c(i, top.model.name, cal.lp$gazetted_stream_name))
+  # clear temporary loop files
+  rm(cal.lp, top.model.name, lp.sys, lp.method, lp.size, 
+     lp.size.clarity, lp.agg, lp.system.method)
+} # end of i loop of calibration data set
+```
+
+```{r}
+cal.out <- filter(cal.out, !is.na(calibrated.estimate)) %>% 
+  mutate(calibrated.estimate = round2(calibrated.estimate, 1),
+         default.per.diff = (calibrated.estimate - default) / default,
+         RSA.per.diff = (calibrated.estimate - RSA) / RSA,
+         RSA.applied = ifelse(is.na(RSA_reason), "No", "Yes")) %>% 
+  left_join(., lpe.ranges)
+
+cal.out.na <- filter(cal.out, is.na(n))
+
+saveRDS(cal.out, "./r_objects/04_01_2024_Calibration.rds")
+write.csv(cal.out, "./tables/04_01_2024_Calibration.csv", row.names = F)
+```

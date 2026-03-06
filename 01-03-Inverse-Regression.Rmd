@@ -1,0 +1,807 @@
+---
+title: "01-03-Inverse-Regressions"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+library(broom) # augment()
+theme_set(theme_bw()) # ggplot
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+library(patchwork) # for multi plot ggplot graphs
+```
+
+## Data
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+
+cal$lnhpe <- log(cal$hpe)
+```
+
+## Model Specifications FILE
+```{r}
+modout <- "./r_objects/models/model_specifications.rds"
+spec.out <- readRDS(modout)
+```
+
+# Inverse Function
+This Code is adapted from Kleiven et al. 2023 - Using camera traps to monitor 
+cyclic vole populations
+It is to apply the calibrate function from the investr package and return 
+statistics on a data point using Inverse Prediction
+```{r}
+cal_4apply <- function(y0, # Low Precision Estimate
+                       mod, # simple linear model 
+                       mean.res=FALSE, interval="Wald")
+  # Apply calibration function from INVESTR PACKAGE
+{
+  x0 <- investr::calibrate(mod,y0,interval=interval, mean.response = mean.res)
+  return(x0[1:4]) # return the High Precision estimate, confidence interval, and Standard Error
+}
+```
+
+# Models
+## No Large Model
+### Aerial + Ground
+subset data to exclude Large and xL data
+```{r}
+cal.SM <- filter(cal,
+                  !size %in% c("X-Large", "Large"))
+```
+
+Simple Linear Model
+```{r}
+lm.SM <- lm(lnlpe~lnhpe, data = cal.SM)
+summary(lm.SM)
+
+# what the linear model looks like
+ggplot(cal.SM,
+       aes(x = lnhpe, y = lnlpe)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+#### Leave One Out
+```{r}
+saveRDS(lm.SM, file = "./r_objects/models/Inverse_SM_Both_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("Inverse_SM_Both_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Inverse_SM_Both_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+model = lm.SM
+  for(i in 1:nrow(cal.SM)){
+    m.temp <- lm(lnlpe~lnhpe, data = cal.SM[-i, ])
+    
+    p.temp <- matrix(unlist(t(sapply(cal.SM$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    model.test <- rbind(model.test, data.frame(model = paste0(as.character(model$call)[2], " Inverse B"),
+                                 usid = cal.SM$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 2)
+
+
+```
+
+```{r plot of percent error}
+ggplot(model.rank,
+       aes(x = log(hpe), y = abs.per.error)) +
+  geom_point()
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Inverse_SM_Both_Data_Model.rds")
+```
+
+### Ground
+subset data to exclude Aerial
+```{r}
+cal.SMG <- filter(cal.SM,
+                  lpe_method == "Ground")
+```
+
+Simple Linear Model
+```{r}
+lm.SMG <- lm(lnlpe~lnhpe, data = cal.SMG)
+summary(lm.SMG)
+
+# what the linear model looks like
+ggplot(cal.SMG,
+       aes(x = lnhpe, y = lnlpe)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+#### Leave One Out
+```{r}
+saveRDS(lm.SMG, file = "./r_objects/models/Inverse_SM_Ground_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("Inverse_SM_Ground_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Inverse_SM_Ground_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+model = lm.SMG
+  for(i in 1:nrow(cal.SMG)){
+    m.temp <- lm(lnlpe~lnhpe, data = cal.SMG[-i, ])
+    
+    p.temp <- matrix(unlist(t(sapply(cal.SMG$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    model.test <- rbind(model.test, data.frame(model = paste0(as.character(model$call)[2], " Inverse G"),
+                                 usid = cal.SMG$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error), 
+         rank.set.level = 2)
+
+
+```
+
+```{r plot of percent error}
+ggplot(model.rank,
+       aes(x = log(hpe), y = abs.per.error)) +
+  geom_point()
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Inverse_SM_Ground_Data_Model.rds")
+```
+
+### Aerial
+subset data to exclude Ground
+```{r}
+cal.SMA <- filter(cal.SM,
+                  lpe_method == "Aerial")
+```
+
+Simple Linear Model
+```{r}
+lm.SMA <- lm(lnlpe~lnhpe, data = cal.SMA)
+summary(lm.SMA)
+
+# what the linear model looks like
+ggplot(cal.SMA,
+       aes(x = lnhpe, y = lnlpe)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+#### Leave One Out
+```{r}
+saveRDS(lm.SMA, file = "./r_objects/models/Inverse_SM_Aerial_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("Inverse_SM_Aerial_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Inverse_SM_Aerial_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+model = lm.SMA
+  for(i in 1:nrow(cal.SMA)){
+    m.temp <- lm(lnlpe~lnhpe, data = cal.SMA[-i, ])
+    
+    p.temp <- matrix(unlist(t(sapply(cal.SMA$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    model.test <- rbind(model.test, data.frame(model = paste0(as.character(model$call)[2], " Inverse A"),
+                                 usid = cal.SMA$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error), 
+         rank.set.level = 2)
+
+
+```
+
+```{r plot of percent error}
+ggplot(model.rank,
+       aes(x = log(hpe), y = abs.per.error)) +
+  geom_point()
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Inverse_SM_Aerial_Data_Model.rds")
+```
+
+## Large Model
+### Aerial + Ground
+subset data to exclude Large and xL data
+```{r}
+cal.LXL <- filter(cal,
+                  size %in% c("X-Large", "Large"))
+```
+
+Simple Linear Model
+```{r}
+lm.LXL <- lm(lnlpe~lnhpe, data = cal.LXL)
+summary(lm.LXL)
+
+# what the linear model looks like
+ggplot(cal.LXL,
+       aes(x = lnhpe, y = lnlpe)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+#### Leave One Out
+```{r}
+saveRDS(lm.LXL, file = "./r_objects/models/Inverse_LXL_Both_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("Inverse_LXL_Both_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Inverse_LXL_Both_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+model = lm.LXL
+  for(i in 1:nrow(cal.LXL)){
+    m.temp <- lm(lnlpe~lnhpe, data = cal.LXL[-i, ])
+    
+    p.temp <- matrix(unlist(t(sapply(cal.LXL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    model.test <- rbind(model.test, data.frame(model = paste0(as.character(model$call)[2], " Inverse B"),
+                                 usid = cal.LXL$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error), 
+         rank.set.level = 2)
+
+
+```
+
+```{r plot of percent error}
+ggplot(model.rank,
+       aes(x = log(hpe), y = abs.per.error)) +
+  geom_point()
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Inverse_LXL_Both_Data_Model.rds")
+```
+
+### Ground
+subset data to exclude Aerial
+```{r}
+cal.LXLG <- filter(cal.LXL,
+                  lpe_method == "Ground")
+```
+
+Simple Linear Model
+```{r}
+lm.LXLG <- lm(lnlpe~lnhpe, data = cal.LXLG)
+summary(lm.LXLG)
+
+# what the linear model looks like
+ggplot(cal.LXLG,
+       aes(x = lnhpe, y = lnlpe)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+#### Leave One Out
+```{r}
+saveRDS(lm.LXLG, file = "./r_objects/models/Inverse_LXL_Ground_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("Inverse_LXL_Ground_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Inverse_LXL_Ground_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+model = lm.LXLG
+  for(i in 1:nrow(cal.LXLG)){
+    m.temp <- lm(lnlpe~lnhpe, data = cal.LXLG[-i, ])
+    
+    p.temp <- matrix(unlist(t(sapply(cal.LXLG$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    model.test <- rbind(model.test, data.frame(model = paste0(as.character(model$call)[2], " Inverse G"),
+                                 usid = cal.LXLG$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error), 
+         rank.set.level = 2)
+
+
+```
+
+```{r plot of percent error}
+ggplot(model.rank,
+       aes(x = log(hpe), y = abs.per.error)) +
+  geom_point()
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Inverse_LXL_Ground_Data_Model.rds")
+```
+
+### Aerial
+subset data to exclude Ground
+```{r}
+cal.LXLA <- filter(cal.LXL,
+                  lpe_method == "Aerial")
+```
+
+Simple Linear Model
+```{r}
+lm.LXLA <- lm(lnlpe~lnhpe, data = cal.LXLA)
+summary(lm.LXLA)
+
+# what the linear model looks like
+ggplot(cal.LXLA,
+       aes(x = lnhpe, y = lnlpe)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+#### Leave One Out
+```{r}
+saveRDS(lm.LXLA, file = "./r_objects/models/Inverse_LXL_Aerial_Data_Model.rds")
+
+specifications_out <- data.frame(model = c("Inverse_LXL_Aerial_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Inverse_LXL_Aerial_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+model = lm.LXLA
+  for(i in 1:nrow(cal.LXLA)){
+    m.temp <- lm(lnlpe~lnhpe, data = cal.LXLA[-i, ])
+    
+    p.temp <- matrix(unlist(t(sapply(cal.LXLA$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    model.test <- rbind(model.test, data.frame(model = paste0(as.character(model$call)[2], " Inverse A"),
+                                 usid = cal.LXLA$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error), 
+         rank.set.level = 2)
+
+
+```
+
+```{r plot of percent error}
+ggplot(model.rank,
+       aes(x = log(hpe), y = abs.per.error)) +
+  geom_point()
+```
+
+#### Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Inverse_LXL_Aerial_Data_Model.rds")
+```
+
+# Table01
+```{r}
+# making a blank table - partly did this way to think about what data I wanted to extract
+table01 <- data.frame(
+  Method = NA,
+  Set = NA,
+  SizeOrSystem = NA,
+  SampleSize = NA,
+  Intercept = NA,
+  Int.Error = NA,
+  Slope = NA,
+  Slp.Error = NA,
+  R2 = NA
+)
+
+# Generate the list of lm models
+models <- mget(ls(pattern = "^lm\\.")) # grab models from above
+
+for(i in 1:length(models)){ # for every model
+  if(i>1) table01 <- rbind(table01, table01[1,]) # add a new blank row if not the first row
+  # then pull out and add the various variables
+  table01$Set[i] = names(models)[i]
+  table01$SampleSize[i] = sum(summary(models[[i]])$df[c(1,2)])
+  table01$Intercept[i] = summary(models[[i]])$coefficients[1,1]
+  table01$Int.Error[i] = summary(models[[i]])$coefficients[1,2]
+  table01$Slope[i] = summary(models[[i]])$coefficients[2,1]
+  table01$Slp.Error[i] = summary(models[[i]])$coefficients[2,2]
+  table01$R2[i] = summary(models[[i]])$r.squared*100
+}
+
+table01$Method = c("Both", "Aerial", "Ground",
+                   "Both", "Aerial", "Ground")
+table01$SizeOrSystem = c(rep("Large-X-Large", 3),
+                         rep("Small-Medium", 3))
+table01$Set = "Size-Aggregate (2)"
+```
+## Residual Plots
+Residual plots for each lm model.
+```{r}
+pL <- ggplot(augment(lm.LXL),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residuals",
+       title = "Large-X-Large-Both")
+
+pLA <- ggplot(augment(lm.LXLA),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residuals",
+       title = "Large-X-Large-Aerial")
+
+pLG <- ggplot(augment(lm.LXLG),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residuals",
+       title = "Large-X-Large-Ground")
+
+pSM <- ggplot(augment(lm.SM),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residuals",
+       title = "Small-Medium-Both")
+
+pSMA <- ggplot(augment(lm.SMA),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residuals",
+       title = "Small-Medium-Aerial")
+
+pSMG <- ggplot(augment(lm.SMG),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residuals",
+       title = "Small-Medium-Ground")
+
+
+(pL + pSM + pLA + pSMA + pLG + pSMG) + 
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(ncol = 2, axis = "collect") +
+  theme(plot.tag = element_text(size = 6))
+
+ggsave("./figures/01_Model_Diagnostics/01-03-Inverse-Regression-01.png",
+       height = 10, width = 8, dpi = 95)
+```
+
+# Individual
+```{r}
+(cal.fil.5 <- count(cal, gazetted_stream_name, lpe_method) %>% 
+  filter(n>5) %>% 
+  mutate(filter5 = paste0(gazetted_stream_name, "_", lpe_method)))
+
+cal5 <- cal %>% 
+  mutate(filter5 = paste0(gazetted_stream_name, "_", lpe_method)) %>% 
+  filter(filter5 %in% cal.fil.5$filter5)
+
+cal5 %>% 
+  ggplot(aes(x = lnlpe, y = log(hpe),
+             colour = filter5)) +
+  geom_point()
+```
+
+## Analysis
+```{r}
+t1n <- nrow(table01) # number of rows of table01 from above
+models <- list()
+
+for(k in 1:nrow(cal.fil.5)){ # for every individual system
+  print(k)
+  # make temporary data with just one system
+  cal5.temp <- filter(cal5, filter5 == cal.fil.5$filter5[k])
+  # make temporary model with just one system
+  
+  m.temp <- lm(lnlpe~lnhpe, data = cal5.temp)
+  
+  table01 <- rbind(table01, table01[1,]) # add a row to fill in
+  # then pull out and add the various variables
+  # # need to add the base row number, t1n, to the k of this loop to keep buidling it up
+  table01$Set[t1n+k] = "Individual (5)"
+  table01$Method[t1n+k] = as.character(cal.fil.5$lpe_method[k])
+  table01$SizeOrSystem[t1n+k] = cal.fil.5$gazetted_stream_name[k]
+  table01$SampleSize[t1n+k] = sum(summary(m.temp)$df[c(1,2)])
+  table01$Intercept[t1n+k] = summary(m.temp)$coefficients[1,1]
+  table01$Int.Error[t1n+k] = summary(m.temp)$coefficients[1,2]
+  table01$Slope[t1n+k] = summary(m.temp)$coefficients[2,1]
+  table01$Slp.Error[t1n+k] = summary(m.temp)$coefficients[2,2]
+  table01$R2[t1n+k] = summary(m.temp)$r.squared*100
+  
+  model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric())
+  models[[k]] <- m.temp
+    
+  saveRDS(m.temp, file = paste0("./r_objects/models/", cal.fil.5$filter5[k], "-Individual_Inverse_Data_Model.rds"))
+
+    for(i in 1:nrow(cal5.temp)){ # for every data point in cal5.temp
+      
+      m.temp <- lm(lnlpe~lnhpe, data = cal5.temp[-i, ])
+      
+      p.temp <- matrix(unlist(t(sapply(cal5.temp$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+     p.temp <- as.data.frame( p.temp )
+     colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+     model.test <- rbind(model.test, data.frame(model = paste0(as.character(m.temp$call)[2], " Inverse Individual"),
+                                 usid = cal5.temp$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  } # end of i loop
+  model.rank.temp <- left_join(model.test, 
+                        dplyr::select(cal5.temp,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+    mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 5)
+  
+  if(k == 1) model.rank = model.rank.temp
+  if(k != 1) model.rank = rbind(model.rank, model.rank.temp)
+} # end of k loop
+
+```
+
+# Save Model Ranks
+```{r}
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Individual_Inverse_Data_Model.rds")
+```
+
+```{r}
+specifications_out <- data.frame(model = c("Individual_Inverse_Data_Model"),
+                                 target = c("lpe","lpe","lpe"),
+                                 order = c(1),
+                                 type = c("log"),
+                                 transform = c(NA))
+
+spec.out <- spec.out %>% 
+  filter(model != "Individual_Inverse_Data_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+
+#Table01 Save
+```{r}
+table01[,5:9] <- round2(table01[,5:9], 2)
+
+write.csv(table01, "./tables/01_03-Inverse-Regression-summary.csv",
+          row.names = F)
+```
+
+## Residual Plots
+```{r}
+plist <- list() # list for plots
+
+for(i in 1:length(models)){
+  plist[[i]] <- ggplot(augment(models[[i]]),
+             aes(x = .fitted, y = .resid)) +
+    geom_hline(yintercept = 0, colour = "grey") +
+  geom_point() +
+  labs(x = "Fitted Values", y = "Response Residual",
+       title = cal.fil.5$gazetted_stream_name[i])
+}
+
+plist[[1]] +  plist[[2]]  +  plist[[3]]+  
+  plist[[4]]+  plist[[5]]+  plist[[6]]+  
+  plist[[7]]+  plist[[8]] +
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(ncol = 2, axis = "collect") +
+  theme(plot.tag = element_text(size = 6))
+
+ggsave("./figures/01_Model_Diagnostics/01-03-Inverse-Regression-02.png",
+       height = 11, width = 8, dpi = 95)
+```
+
+# Remove Some Models from the Candidate Set
+Based on residual patterns and small sample sizes.
+Removing models with a sample size less than 11 (i.e. > 10)
+```{r}
+# deleting models
+file.remove("./r_objects/models/Harrison River_Aerial-Individual_Inverse_Data_Model.rds")
+file.remove("./r_objects/models/Adams River (Lower)_Ground-Individual_Inverse_Data_Model.rds")
+file.remove("./r_objects/models/Inverse_LXL_Ground_Data_Model.rds")
+
+# deleting Model Rank files
+file.remove("./r_objects/01_Model_Ranks_from_Inverse_LXL_Ground_Data_Model.rds")
+
+model.rank <- model.rank %>% 
+  filter(!gazetted_stream_name %in% c("Harrison River", "Adams River (Lower)"))
+saveRDS(model.rank, "r_objects/01_Model_Ranks_from_Individual_Inverse_Data_Model.rds")
+```
+

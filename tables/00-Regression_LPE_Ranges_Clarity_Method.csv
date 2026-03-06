@@ -1,0 +1,13 @@
+"size","water_clarity","lpe_method","n","min10","max10"
+"Large","Clear","Aerial",3,13370,48030
+"Large","Clear","Ground",7,17460,345560
+"Medium","Clear","Aerial",25,5640,144480
+"Medium","Clear","Ground",25,18790,101090
+"Medium","Pt_Turb_Tannic","Aerial",13,2230,85660
+"Medium","Pt_Turb_Tannic","Ground",2,4860,28450
+"Small","Clear","Aerial",1,20410,24940
+"Small","Clear","Ground",56,70,26050
+"Small","Pt_Turb_Tannic","Ground",2,660,12320
+"X-Large","Clear","Aerial",10,3200,192500
+"X-Large","Clear","Ground",1,47790,58410
+"X-Large","Pt_Turb_Tannic","Aerial",17,6250,267800

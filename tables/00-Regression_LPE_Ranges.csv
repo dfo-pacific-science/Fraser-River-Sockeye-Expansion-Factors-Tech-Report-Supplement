@@ -1,0 +1,9 @@
+"size","lpe_method","n","min10","max10"
+"Large","Aerial",3,13370,48030
+"Large","Ground",7,17460,345560
+"Medium","Aerial",38,2230,144480
+"Medium","Ground",27,4860,101090
+"Small","Aerial",1,20410,24940
+"Small","Ground",58,70,26050
+"X-Large","Aerial",27,3200,267800
+"X-Large","Ground",1,47790,58410

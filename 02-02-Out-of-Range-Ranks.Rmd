@@ -1,0 +1,327 @@
+---
+title: "02-02-Out-of-Range_Ranks"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # for label_comma()
+library(stringr) # str_extract str_subset
+library(plotrix) # taylor.diagram()
+library(car) # leveneTest
+library(rstatix) # pairwise, identify_outliers
+library(lmtest) # lrtest(), likelihood ratio test
+```
+
+## Functions
+```{r}
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+# Data
+## Model Selection Results
+Reading in the model selection results.
+```{r}
+# calibration data 
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+# LOO model rank base data
+mod.ranks <- readRDS(file = "./r_objects/02_01_combined_model_LOO_rank_data.rds")
+```
+
+# High Abundance Estimates subset
+```{r}
+# filter LOOs to only high abundances
+mod.abund <- filter(mod.ranks,
+                    classic/1.8 > 75000)
+# filter source models so that they are only those that have a LOO for every matching pair
+tempfilter2 <- mod.abund %>% 
+      count(source) %>% 
+      filter(n == max(n))
+
+# Filter based on the source filter
+mod.abund <- filter(mod.abund,
+                    source %in% tempfilter2$source)
+# just checking if there are equivalent samples between the two methods
+count(mod.abund, lpe_method)
+# creating 3 rank sets
+rank.abund.both <- rank.summary(mod.abund) 
+rank.abund.ground <- rank.summary(filter(mod.abund, lpe_method == "Ground")) 
+rank.abund.aerial <- rank.summary(filter(mod.abund, lpe_method == "Aerial")) 
+```
+
+```{r}
+# make a list of the three high abundance rank sets
+sys.meth.set <- list(rank.abund.both, rank.abund.ground, rank.abund.aerial)
+# make a set of colours, will be the same for each set, so don't need to loop them
+loop.cols <- c("#000000","#E69F00",  "#56B4E9", "#009E73")
+
+for(i in 1:3){
+  
+  loop.dat <- sys.meth.set[[i]]
+  loop.source <- loop.dat$source[loop.dat$rel.sum == min(loop.dat$rel.sum)] # top model source
+  loop.dat.top <- filter(mod.abund,
+                         source == loop.source) # filter to top mode
+  loop.method <- if(i == 1){
+    "Both"
+  } else if(i == 2){
+    "Ground"
+  } else {
+    "Aerial"
+  }
+  if(i != 1) loop.dat.top <- filter(loop.dat.top, lpe_method == loop.method)
+      
+  # Relative Rank Sum
+  pl1 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, rel.sum,
+                                sys.meth.set, median), 
+             y = rel.sum, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    ylim(c(0,1)) +
+    labs(x = "", y = "Average \n Relative Model Rank \n (1=Worst, 0=Best)")
+  
+  # Mean Percent Error
+  pl2 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, abs.mean.percent.error,
+                                sys.meth.set, median), 
+             y = mean.percent.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0.15, col = "grey") +
+    geom_hline(yintercept = -0.15, col = "grey") +
+    geom_hline(yintercept = 0.50, col = "black") +
+    geom_hline(yintercept = -0.50, col = "black") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    geom_hline(yintercept = 0) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Mean Percent \n Error (MPE)")
+  
+  # Mean Absolute Percent Error
+  pl3 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, mean.abs.per.error,
+                                sys.meth.set, median), 
+             y = mean.abs.per.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0.15, col = "grey") +
+    geom_hline(yintercept = 0.50, col = "black") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Mean Absolute Percent \n Error (MAPE)")
+  
+  # Root mean squared error
+  pl4 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, root.mean.sqrd.error,
+                                sys.meth.set, median), 
+             y = root.mean.sqrd.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Root Mean Squared \n Error (RMSE)")
+
+  # R correlation coefficient
+  pl6 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, -r.correlation,
+                                sys.meth.set, median), 
+             y = r.correlation, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    geom_hline(yintercept = 0.80, col = "grey") +
+    geom_hline(yintercept = 1, col = "black") +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Correlation Coefficient \n (R)")
+  
+  # LPE vs. HAE and Fit graph
+  pl7 <- ggplot(loop.dat.top,
+                aes(x = classic/1.8, y = hpe)) +
+    geom_point(alpha = 0.75) +
+    geom_point(aes(y = calibrated.estimate), colour = "red", alpha = 0.60) +
+    scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+    theme(axis.text.y = element_text(angle = 90, hjust = 0.5, vjust = 1),
+          panel.grid.major = element_line(colour = "grey")) +
+    #geom_vline(xintercept = 75000, alpha = 0.25, lty = 2) +
+    labs(x = "Low Precision Estimate (LPE)",
+         y = "High Accuracy Estimate \n (HAE-black) \n & Top Model Fit (Red)",
+         title = paste0(loop.source))
+  
+  # combining the plots using patchwork
+  (pl2 | pl3) / (pl4 | pl6) / (pl1) +
+    plot_annotation(paste0("Model Performance Results for \n ", "High Abundance ", 
+                           loop.method," Set [", 
+                           nrow(loop.dat.top), "]"),
+                    theme=theme(plot.title=element_text(hjust=0.5))) +
+    plot_layout(heights = c(1,1,1),
+                guides = 'collect') & 
+      theme(legend.position = 'top') &
+    guides(fill = guide_legend(nrow = 3))
+  
+  ggsave(paste0("./figures/02_Rank_Summaries/02_02_Out_of_Range_Rank_Summaries/", 
+                "High_Abundance_", 
+                           loop.method,"_Set", ".png"),
+         height = 7.2, width = 8, dpi = 150)
+  
+}
+
+```
+
+# Low Abundance Estimates subset
+```{r}
+# filter LOOs to only high abundances
+mod.low <- filter(mod.ranks,
+                    classic/1.8 < 25000,
+                  size %in% c("Small", "Medium"))
+# filter source models so that they are only those that have a LOO for every matching pair
+tempfilter2 <- mod.low %>% 
+      count(source) %>% 
+      filter(n == max(n))
+
+# Filter based on the source filter
+mod.low <- filter(mod.low,
+                    source %in% tempfilter2$source)
+# just checking if there are equivalent samples between the two methods
+count(mod.low, lpe_method)
+# creating 3 rank sets
+rank.low.both <- rank.summary(mod.low) 
+rank.low.ground <- rank.summary(filter(mod.low, lpe_method == "Ground")) 
+rank.low.aerial <- rank.summary(filter(mod.low, lpe_method == "Aerial")) 
+```
+
+```{r}
+# make a list of the three high abundance rank sets
+sys.meth.set <- list(rank.low.both, rank.low.ground, rank.low.aerial)
+unique(rank.low.both$source)
+unique(rank.low.ground$source)
+unique(rank.low.aerial$source)
+# make a set of colours, will be the same for each set, so don't need to loop them
+loop.cols <- c("#000000","#E69F00",  "#56B4E9", "#009E73",
+               "#F0E442", "#CC79A7", "#661100", "#332200")
+
+for(i in 1:3){
+  
+  loop.dat <- sys.meth.set[[i]]
+  loop.source <- loop.dat$source[loop.dat$rel.sum == min(loop.dat$rel.sum)] # top model source
+  loop.dat.top <- filter(mod.low,
+                         source == loop.source) # filter to top mode
+  loop.method <- if(i == 1){
+    "Both"
+  } else if(i == 2){
+    "Ground"
+  } else {
+    "Aerial"
+  }
+  if(i != 1) loop.dat.top <- filter(loop.dat.top, lpe_method == loop.method)
+      
+  # Relative Rank Sum
+  pl1 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, rel.sum,
+                                sys.meth.set, median), 
+             y = rel.sum, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    ylim(c(0,1)) +
+    labs(x = "", y = "Average \n Relative Model Rank \n (1=Worst, 0=Best)")
+  
+  # Mean Percent Error
+  pl2 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, abs.mean.percent.error,
+                                sys.meth.set, median), 
+             y = mean.percent.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0.15, col = "grey") +
+    geom_hline(yintercept = -0.15, col = "grey") +
+    geom_hline(yintercept = 0.50, col = "black") +
+    geom_hline(yintercept = -0.50, col = "black") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    geom_hline(yintercept = 0) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Mean Percent \n Error (MPE)")
+  
+  # Mean Absolute Percent Error
+  pl3 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, mean.abs.per.error,
+                                sys.meth.set, median), 
+             y = mean.abs.per.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0.15, col = "grey") +
+    geom_hline(yintercept = 0.50, col = "black") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Mean Absolute Percent \n Error (MAPE)")
+  
+  # Root mean squared error
+  pl4 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, root.mean.sqrd.error,
+                                sys.meth.set, median), 
+             y = root.mean.sqrd.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Root Mean Squared \n Error (RMSE)")
+
+  # R correlation coefficient
+  pl6 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, -r.correlation,
+                                sys.meth.set, median), 
+             y = r.correlation, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    geom_hline(yintercept = 0.80, col = "grey") +
+    geom_hline(yintercept = 1, col = "black") +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Correlation Coefficient \n (R)")
+  
+  # LPE vs. HAE and Fit graph
+  pl7 <- ggplot(loop.dat.top,
+                aes(x = classic/1.8, y = hpe)) +
+    geom_point(alpha = 0.75) +
+    geom_point(aes(y = calibrated.estimate), colour = "red", alpha = 0.60) +
+    scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+    theme(axis.text.y = element_text(angle = 90, hjust = 0.5, vjust = 1),
+          panel.grid.major = element_line(colour = "grey")) +
+    #geom_vline(xintercept = 75000, alpha = 0.25, lty = 2) +
+    labs(x = "Low Precision Estimate (LPE)",
+         y = "High Accuracy Estimate \n (HAE-black) \n & Top Model Fit (Red)",
+         title = paste0(loop.source))
+  
+  # combining the plots using patchwork
+  (pl2 | pl3) / (pl4 | pl6) / (pl1)  +
+    plot_annotation(paste0("Model Performance Results for \n ", "Low Abundance ", 
+                           loop.method," Set [", 
+                           nrow(loop.dat.top), "]"),
+                    theme=theme(plot.title=element_text(hjust=0.5))) +
+    plot_layout(heights = c(1,1,1),
+                guides = 'collect') & 
+      theme(legend.position = 'top') &
+    guides(fill = guide_legend(nrow = 3))
+  
+  ggsave(paste0("./figures/02_Rank_Summaries/02_02_Out_of_Range_Rank_Summaries/", 
+                "Low_Abundance_", 
+                           loop.method,"_Set", ".png"),
+         height = 7.2, width = 8, dpi = 150)
+  
+}
+
+```
+

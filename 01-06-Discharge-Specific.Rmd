@@ -1,0 +1,929 @@
+---
+title: "01-06-Discharge-Specific"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+https://www.rdocumentation.org/packages/tidyhydat/versions/0.6.1/topics/hy_daily_flows
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(MASS) # boxcox - masked from ‘package:dplyr’: select()
+library(lme4) # generalized linear regressions
+# methods(class = "lmerMod") # shows what functionality is available
+library(MuMIn) # dredge
+library(PerformanceAnalytics) # correlation figure
+library(glmmTMB) # generalized linear regressions
+library(car)       # for vif()
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # for label_comma()
+library(tidyhydat) # hy_daily for hydrometric data
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+## Data
+```{r}
+modout <- "./r_objects/models/model_specifications.rds" # for saving specifications later
+spec.out <- readRDS(modout)
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+
+cal <- cal %>% filter(!is.na(water_discharge))
+# considering removing systems with less than 5 to be able to use a random effect of system
+count(cal, gazetted_stream_name)
+count(cal, lpe_method) # stored as a character so the summary didn't catch the count between levels
+summary(cal)
+```
+
+Variables with > 5 n per level:
+system_stability
+size (if Small is rolled into Medium)
+water_clarity (if Turbid is rolled into Pt. Turbid/Tannic)
+substrate_shade
+canopy_cover (excluding High which has 0)
+large_woody_debris (if High is treated as Medium)
+lpe_method
+
+
+### Plot by System
+```{r}
+cal %>% 
+  ggplot(aes(x = lnlpe.sc, y = log(hpe), 
+             colour = gazetted_stream_name,
+             shape = size)) +
+  geom_point() +
+  labs(x = "ln(Scaled - Low Precision Estimate)", 
+       y = "ln(High Precision Estimate)")
+```
+
+The smallest observation may act as a high leverage point.
+
+# Stellako Specific
+```{r}
+stel <- cal %>% filter(gazetted_stream_name == "Stellako River")
+summary(stel)
+count(stel, lpe_method)
+# most of these are paired counts between aerial and ground.
+
+stel %>% 
+  ggplot(aes(x = lnlpe.sc, y = log(hpe), 
+             shape = lpe_method)) +
+  geom_point() +
+  labs(x = "ln(Scaled - Low Precision Estimate)", 
+       y = "ln(High Precision Estimate)")
+```
+
+Variables with > 5 n per level (and no NAs):
+water_discharge
+
+## Test for Normality
+High precision estimates
+```{r}
+hist(stel$hpe)
+shapiro.test(stel$hpe) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(stel$hpe ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(stel$hpe))
+shapiro.test(log(stel$hpe)) # worse
+hist(sqrt(stel$hpe))
+shapiro.test(sqrt(stel$hpe)) # not as good as untransformed but normal
+hist((stel$hpe)^(1/3))
+shapiro.test((stel$hpe)^(1/3)) # worst
+```
+low precision estimates
+```{r}  
+hist(stel$lpe)
+shapiro.test(stel$lpe) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(stel$lpe ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(stel$lpe))
+shapiro.test(log(stel$lpe)) # not very acceptable
+hist(sqrt(stel$lpe))
+shapiro.test(sqrt(stel$lpe)) # bestish
+hist((stel$lpe)^(1/3))
+shapiro.test((stel$lpe)^(1/3)) # ok
+```
+
+### Transformation Plots
+LPE and HPE
+```{r}
+p.st1 <- stel %>% 
+  ggplot(aes(x = lpe, y = hpe,
+             colour = water_discharge)) +
+  geom_point()
+
+p.st2 <- stel %>% 
+  ggplot(aes(x = log(lpe), y = log(hpe),
+             colour = water_discharge)) +
+  geom_point()
+
+p.st3 <- stel %>% 
+  ggplot(aes(x = sqrt(lpe), y = hpe,
+             colour = water_discharge)) +
+  geom_point()
+
+p.st4 <- stel %>% 
+  ggplot(aes(x = sqrt(lpe), y = log(hpe),
+             colour = water_discharge)) +
+  geom_point()
+
+(p.st1 | p.st2) / (p.st3 | p.st4) + plot_layout(guides = 'collect')
+```
+None look like they would necessarily make the distribution of data "better"
+since the range of data is relatively small compared to the larger data sets.
+
+May be "simplest" to use negative binomial and no transformations on hpe as also suggested from shapiro.
+Transform lpe with a sqrt as suggested from shapiro.
+
+Later determined that using the identity link results in negative error bars.
+So using the log-link.
+
+## Center and Scale
+Scaling flow by system-specific and time period specific recent average.
+```{r}
+stel.flow <- hy_daily_flows(station_number = "08JB002")
+stel.flow <- stel.flow %>% 
+  mutate(Year = format(as.Date(Date, format="%Y/%m/%d"),"%Y"),
+         JDay = lubridate::yday(Date)) %>% 
+  group_by(Year) %>% 
+  mutate(records = n()) %>% 
+  ungroup() %>% 
+  mutate(complete = records >= 364) %>% 
+  filter(complete == TRUE)
+
+stel.flow.summary <- stel.flow %>% 
+  filter(Year >= 2024-20) %>% 
+  group_by(JDay) %>% 
+  summarise(average = mean(Value),
+            p10 = quantile(Value, 0.10),
+            p25 = quantile(Value, 0.25),
+            p50 = quantile(Value, 0.50),
+            p75 = quantile(Value, 0.75),
+            p90 = quantile(Value, 0.90),
+            max = max(Value),
+            min = min(Value))
+
+ggplot(stel.flow.summary,
+       aes(x = JDay, y = average)) +
+  geom_line() +
+  geom_line(aes(y = p10), col = "purple") +
+  geom_line(aes(y = p90), col = "purple") +
+  geom_line(aes(y = min), col = "red") +
+  geom_line(aes(y = max), col = "red") +
+  geom_vline(xintercept = c(245, 281)) + # Sep 1 - Oct 7 - range of Summer Peak Spawn dates from 2023 Prelim (excluding Harrison and Widgeon)
+  geom_point(data = stel,
+             aes(x = lubridate::yday(lpe_date),
+                 y = water_discharge),
+             colour = "blue",
+             alpha = 0.7)
+
+stel.mean = mean(stel.flow.summary$average[stel.flow.summary$JDay %in% c(245:281)])
+stel.sd = sd(stel.flow.summary$average[stel.flow.summary$JDay %in% c(245:281)])
+mean(stel$water_discharge)
+sd(stel$water_discharge)
+
+stel <- stel %>% 
+  mutate(root.lpe = sqrt(lpe),
+         root.lpe.sc = scale(root.lpe, center=T, scale=T)[,1],
+         discharge.sc = (water_discharge-stel.mean)/stel.sd,
+         lnlpe.sc = scale(lnlpe, center = T, scale = T)[,1])
+
+hist(stel$discharge.sc)
+```
+
+
+## Correlation Coefficients
+```{r correlation figure}
+summary(stel)
+
+stel.cor <- round(cor(dplyr::select(stel,
+                 lpe_method_recode, root.lpe.sc, lnlpe.sc,
+                 discharge.sc)), 3)
+stel.cor
+
+#png(file="figures/Discharge - Stellako - calibration Correlation Plot.png",
+#    units = "in", width=10, height=5, res = 250)
+
+chart.Correlation(dplyr::select(stel, 
+                 lpe_method_recode, root.lpe.sc, lnlpe.sc,
+                 discharge.sc), 
+                  histogram = TRUE, method = "pearson")
+#dev.off()
+```
+root.lpe is a little correlated with discharge.
+
+## Model
+### Compare lnlpe vs root.lpe
+Above, just based on distribution, it may have been best to select square-root
+transformed lpe, but I wanted to test it in the model framework as well.
+```{r}
+m.stel.root <- glm.nb(hpe ~ root.lpe.sc, data = stel, 
+                      na.action = "na.fail", link = "log")
+m.stel.ln <- glm.nb(hpe ~ lnlpe.sc, data = stel, 
+                      na.action = "na.fail", link = "log")
+
+arrange(MuMIn::AICc(m.stel.root, m.stel.ln), AICc) %>% 
+  mutate(delta = AICc - min(AICc))
+```
+using the natural-log is better by >4 AICc.
+
+### Testing Quadratic as Global Model
+Notes with regards to quadratics
+https://stats.stackexchange.com/questions/379841/in-linear-regression-why-should-we-include-quadratic-terms-when-we-are-only-int
+https://stats.stackexchange.com/questions/11009/including-the-interaction-but-not-the-main-effects-in-a-model
+https://quantifyinghealth.com/quadratic-term-in-regression/
+
+```{r}
+m.stel <- glm.nb(hpe ~ lnlpe.sc:lpe_method + lpe_method:I(lnlpe.sc^2) +
+                           lnlpe.sc:discharge.sc + discharge.sc:I(lnlpe.sc^2) +
+                   lnlpe.sc + I(lnlpe.sc^2) + lpe_method + discharge.sc, 
+    data=stel, 
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link = "log") 
+
+summary(m.stel)
+# Pearson residual is more appropriate for a glm that doesn't assume Gaussian error distribution
+plot((fitted(m.stel)), residuals(m.stel, type = "pearson"))
+
+m.stel.coef <- as.data.frame(summary(m.stel)$coefficients)
+m.stel.coef$parameter = row.names(m.stel.coef)
+colnames(m.stel.coef)[2] = "std.error"
+
+ggplot(m.stel.coef[-1,],
+       aes(x = parameter, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+```
+
+#### Dredge
+```{r}
+m.dredge <- dredge(m.stel, beta = "sd", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 4)) %>% 
+  dplyr::select(discharge.sc:delta)
+
+write.csv(m.dredge, file = "./tables/01_06-Stellako-Discharge.csv", na = "", row.names = F)
+```
+
+3 witin 4 AICc.
+All contain discharge.sc, lnl.sc, lnl.sc^2 and 
+the interaction between discharge and lpe^2
+
+Most Parsimonious is also the top.
+2 out of the other four contain lpe_method. One contains the interaction 
+between discharge and lpe and one contains interaction with lpe_method and lpe^2.
+
+##### Top
+```{r}
+m.stel.top <- glm.nb(hpe ~ lnlpe.sc + discharge.sc + I(lnlpe.sc^2) +
+                       discharge.sc:I(lnlpe.sc^2), 
+    data=stel, 
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+
+summary(m.stel.top)
+# Pearson residual is more appropriate for a glm that doesn't assume Gaussian error distribution
+png(file = "./figures/01_Model_Diagnostics/01-06-Stellako-Discharge-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.stel.top)), residuals(m.stel.top, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Specialized (6) - Stellako Discharge Model")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+stel$usid[which(abs(residuals(m.stel.top, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.stel.top))
+abline(h = 4/nrow(stel), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.stel.top)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+stel$usid[which(cooks.distance(m.stel.top) > 3*mean(cooks.distance(m.stel.top)))]
+
+m.stel.top.coef <- as.data.frame(summary(m.stel.top)$coefficients)
+m.stel.top.coef$parameter = row.names(m.stel.top.coef)
+colnames(m.stel.top.coef)[2] = "std.error"
+
+ggplot(m.stel.top.coef[-1,],
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip() +
+  labs(x = "Parameter")
+
+ggsave("./figures/01_Model_Diagnostics/01-06-Stellako-Discharge-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.coef <- dplyr::select(m.stel.top.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) %>% 
+  mutate(cross.zero = ifelse(abs(Estimate) < abs(std.error), "Yes", "No"))
+write.csv(m.coef, file = "./tables/01_06-Steallko-Discharge-Parameters.csv",
+          row.names = F)
+```
+
+Double check
+```{r}
+arrange(MuMIn::AICc(m.stel, m.stel.top, m.stel.ln), AICc) %>% 
+  mutate(delta = AICc - min(AICc))
+```
+
+## Leave One Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+models <- list(m.stel.top)
+
+saveRDS(m.stel.top, file = "./r_objects/models/Stellako_Discharge_Model.rds")
+
+specifications_out <- data.frame(model = "Stellako_Discharge_Model",
+                                 target = c("lpe","lpe","lpe",
+                                            "discharge","discharge"),
+                                 order = c(1,2,3,
+                                           1,2),
+                                 type = c("log","center","scale",
+                                          "center", "scale"),
+                                 transform = c(NA, mean(stel$lnlpe), sd(stel$lnlpe),
+                                               stel.mean, stel.sd))
+
+
+spec.out <- spec.out %>% 
+  filter(model != "Stellako_Discharge_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the one data point.
+```{r}
+for(j in 1:length(models)){
+  model = models[[j]]
+  for(i in 1:nrow(stel)){
+    m.temp <- glm.nb(as.character(model$call)[2],
+                     data=stel[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+    p.temp <- predict(m.temp, type="link", stel[i, ], se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = stel$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(stel,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 6)
+
+```
+### Plots
+```{r plot of error}
+model.rank %>% 
+  ggplot(aes(x = hpe, y = error)) +
+  geom_point() +
+  scale_y_continuous(labels = label_comma())
+```
+
+```{r plot of percent error}
+model.rank %>% 
+  ggplot(aes(x = hpe, y = per.error)) +
+  geom_point()
+```
+
+```{r plot of absolute percent error}
+model.rank %>% 
+  ggplot(aes(x = hpe, y = abs.per.error)) +
+  geom_point()
+```
+
+```{r plot of absolute percent error by system}
+set.seed(234)
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error,
+             colour = model)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  geom_point(position = "jitter", alpha = 0.5) +
+  coord_flip() +
+  labs(title = "Stellako Discharge Model Performance",
+       y = "Absolute percent error", x = "Streams",
+       colour = "Model Types") +
+  theme(legend.position = "top")
+
+#ggsave("figures/Model Performance/03_Model_Performance_Stellako_Discharge.png",
+#       height = 6, width = 8, dpi = 150)
+```
+
+```{r}
+filter(model.rank,
+       abs.per.error > 0.4)
+```
+
+## Save Model Ranks
+```{r}
+saveRDS(model.rank, 
+        "r_objects/03_Model_Ranks_from_Stellako_Discharge_Model.rds")
+```
+
+
+# All Systems
+```{r}
+summary(cal)
+count(cal, system_stability)
+```
+
+Variables with > 5 n per level (and no NAs):
+water_discharge
+lpe_method
+system_stability
+size only has 2 v.smalls, one of which is quite an outlier numerically (Dust 2002)
+water_clarity
+substrate_shade
+canopy_cover
+LWD only 1 high, won't include.
+
+Removing Small System
+```{r}
+count(cal, size)
+
+cal %>% filter(hpe == min(hpe))
+
+cal <- cal %>% 
+  filter(size != "Small")
+```
+
+Also discovered that Middle River's discharge is from an unknown location.
+Removing it.
+
+```{r}
+cal <- cal %>% 
+  filter(gazetted_stream_name != "Middle River")
+```
+
+
+## Test for Normality
+High precision estimates
+```{r}
+hist(cal$hpe)
+shapiro.test(cal$hpe) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$hpe ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$hpe))
+shapiro.test(log(cal$hpe)) # good
+hist(sqrt(cal$hpe))
+shapiro.test(sqrt(cal$hpe)) # bad
+hist((cal$hpe)^(1/3))
+shapiro.test((cal$hpe)^(1/3)) # best but log looks fine, so will use that with negative binom.
+```
+low precision estimates
+```{r}  
+hist(cal$lpe)
+shapiro.test(cal$lpe) # p < 0.01-0.05 means that it is NOT normal
+b <- boxcox(lm(cal$lpe ~ 1))
+b$x[which.max(b$y)] # lambda
+hist(log(cal$lpe))
+shapiro.test(log(cal$lpe)) # Good
+hist(sqrt(cal$lpe))
+shapiro.test(sqrt(cal$lpe)) # bad
+hist((cal$lpe)^(1/3))
+shapiro.test((cal$lpe)^(1/3)) # not good
+```
+
+Discharge should be scaled within a system. 
+Thinking about it as, does the relative change in discharge within a system 
+explain the residuals of the standard lpe vs hpe relationship?
+
+Plan to centre by system specific recent average and scale by recent system deviation.
+## Center and Scale
+```{r}
+cal <- cal %>% 
+  mutate(ln.lpe = log(lpe),
+         ln.lpe.sc = scale(ln.lpe, center=T, scale=T)[,1])
+
+# environment canada stations where flow data comes from
+ec.stations <- unique(dplyr::select(cal, ec_station_number, gazetted_stream_name, 
+                        run_timing_group)) %>% 
+  mutate(start = case_when(
+    run_timing_group == "Summer" ~ 245, # Sep 1
+    run_timing_group == "Early Summer" ~ 245, # Sep 1 (excludes Chilliwack and Upper Barriere)
+    run_timing_group == "Late" ~ 275 # Oct 1
+  ),
+  end = case_when(
+    run_timing_group == "Summer" ~ 281, # Oct 7
+    run_timing_group == "Early Summer" ~ 272, # Sep 28 (excludes Chilliwack and Upper Barriere)
+    run_timing_group == "Late" ~ 299 # Oct 25 just including Shuswap Complex
+  ))
+
+# found in comments that Harrison's Discharge is from station 08MG013, while the Water Level is from the one in the database
+ec.stations$ec_station_number[ec.stations$gazetted_stream_name == "Harrison River"] <- "08MG013"
+# Harrison is also "wack" as a "Summer" timing group. So manually changing its timing
+ec.stations$start[ec.stations$gazetted_stream_name == "Harrison River"] <- 313 # Nov 8
+ec.stations$end[ec.stations$gazetted_stream_name == "Harrison River"] <- 321 # Nov 16
+
+cal.flow <- hy_daily_flows(station_number = ec.stations$ec_station_number,
+                           start_date = "2004-01-01")
+cal.flow <- cal.flow %>% 
+  mutate(Year = format(as.Date(Date, format="%Y/%m/%d"),"%Y"), # pull out year
+         JDay = lubridate::yday(Date)) %>%  # pull out day of year
+  filter(!is.na(Value)) %>% # remove missing data rows
+  group_by(STATION_NUMBER, Year) %>% # grouping by station number and year
+  mutate(records = n()) %>% 
+  ungroup() %>% 
+  mutate(complete = records >= 364) # flag incomplete years
+# although, it should only matter for the periods when we are taking the average.
+
+cal.flow.summary <- cal.flow %>% 
+  # filter(Year >= 2024-20) %>% # doing this step with start_date in hy_daily_flows now
+  group_by(STATION_NUMBER, JDay) %>% 
+  summarise(average = mean(Value),
+            n = n(),
+            p10 = quantile(Value, 0.10),
+            p25 = quantile(Value, 0.25),
+            p50 = quantile(Value, 0.50),
+            p75 = quantile(Value, 0.75),
+            p90 = quantile(Value, 0.90))
+
+ggplot(cal.flow.summary,
+       aes(x = JDay, y = average)) +
+  geom_line() +
+  geom_line(aes(y = p10), col = "purple") +
+  geom_line(aes(y = p90), col = "purple") +
+  # geom_vline(xintercept = c(245, 281)) 
+  facet_wrap(~STATION_NUMBER, scales = "free_y")
+
+ec.stations$mean <- NA
+ec.stations$sd <- NA
+
+for(i in 1:nrow(ec.stations)){
+  temp <- cal.flow.summary %>% 
+    filter(STATION_NUMBER == ec.stations$ec_station_number[i],
+           JDay >= ec.stations$start[i],
+           JDay <= ec.stations$end[i])
+  ec.stations$mean[i] = mean(temp$average)
+  ec.stations$sd[i] = sd(temp$average)
+}
+
+cal <- cal %>% 
+  left_join(., dplyr::select(ec.stations, !ec_station_number)) %>% 
+  mutate(discharge.sc = (water_discharge - mean) / sd)
+
+hist(cal$discharge.sc) # there is one big outlier - need to confirm if it is "real"
+filter(cal, discharge.sc == max(discharge.sc)) # from Harrison
+hist(cal$discharge.sc[cal$gazetted_stream_name == "Harrison River"])
+hist(cal$discharge.sc[cal$discharge.sc < max(cal$discharge.sc)]) # there is one big outlier - need to confirm if it is "real"
+
+# from the images below, it looks legitimate. Just big swings in Harrison data.
+filter(cal.flow,
+       STATION_NUMBER == ec.stations$ec_station_number[ec.stations$gazetted_stream_name == "Harrison River"],
+       Year >= 2015, Year <= 2017) %>% 
+  ggplot(aes(x = Date, y = Value)) +
+  geom_line()
+
+filter(cal.flow.summary,
+       STATION_NUMBER == ec.stations$ec_station_number[ec.stations$gazetted_stream_name == "Harrison River"]) %>% 
+  ggplot(aes(x = JDay, y = average)) +
+  geom_line() +
+  geom_line(aes(y = p90), col = "red") +
+  geom_line(aes(y = p10), col = "red") +
+  geom_vline(xintercept = c(313, 321))
+
+ggplot(cal,
+       aes(x = lnlpe.sc, y = log(hpe),
+           colour = discharge.sc)) +
+  geom_point()
+```
+
+
+## Correlation Coefficients
+```{r correlation figure}
+cal.cor <- round(cor(dplyr::select(cal, size_recode, stability_recode, water_clarity_recode, 
+                 substrate_shade_recode, canopy_cover_recode,
+                 lpe_method_recode, ln.lpe.sc, discharge.sc)), 3)
+cal.cor
+
+#png(file="figures/Discharge - Sockeye Calibration Correlation Plot.png",
+#    units = "in", width=10, height=5, res = 250)
+
+chart.Correlation(dplyr::select(cal, size_recode, stability_recode, water_clarity_recode, 
+                 substrate_shade_recode, canopy_cover_recode,
+                 lpe_method_recode, ln.lpe.sc, discharge.sc), 
+                  histogram = TRUE, method = "pearson")
+#dev.off()
+```
+Number of Variables with strong correlations
+size has 3 > 0.5
+Stability has 2 > 0.69
+Water clarity has 5 > 0.4
+substrade_shade is good
+canopy_cover has 1 > 0.7 and 2 > 0.5
+lpe_method has 2 > 0.4
+discharge is not correlated with anything!
+
+Prioritizing Size since it is a known factor from prior analysis.
+That would remove Stability, Water_Clarity, and Canopy_Cover.
+Keep Substrate Shade and LPE Method along with Size and Discharge.
+
+## Model
+```{r}
+count(cal, gazetted_stream_name) # stellako a major driver
+count(cal, size)
+```
+Not enough samples per river to make river a random effect.
+
+###Discharge
+```{r}
+m.cal <- glm.nb(hpe ~ size + ln.lpe.sc + size:ln.lpe.sc + 
+                  discharge.sc + 
+                  lpe_method + 
+                  lpe_method*ln.lpe.sc +
+                  discharge.sc*ln.lpe.sc +
+                  substrate_shade, 
+    data=cal, 
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+
+summary(m.cal)
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot((fitted(m.cal)), residuals(m.cal, type = "pearson"))
+
+m.cal.coef <- as.data.frame(summary(m.cal)$coefficients)
+m.cal.coef$parameter = row.names(m.cal.coef)
+colnames(m.cal.coef)[2] = "std.error"
+
+ggplot(m.cal.coef[-1,],
+       aes(x = parameter, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+```
+Discharge doesn't look like it has much of an effect.
+
+#### Dredge
+```{r}
+m.dredge <- dredge(m.cal, beta = "sd", rank = "AICc")
+m.dredge
+
+m.dredge <- as.data.frame(m.dredge %>% filter(delta < 4)) %>% 
+  dplyr::select(discharge.sc:delta)
+
+write.csv(m.dredge, file = "./tables/01_06-Discharge-All.csv", na = "", row.names = F)
+```
+
+Dredge reveals that the top model and generally more parsimonious model does
+not have discharge, nor lpe_method, nor either of the interactions.
+
+Discharge only has about 0.146 total weight within the top 4 AICc. 
+
+###Discharge No Stellako
+Trying with removing Stellako
+```{r}
+cal5 <- filter(cal, gazetted_stream_name != "Stellako River")
+cal5 <- cal5 %>% 
+  mutate(ln.lpe = log(lpe),
+         ln.lpe.sc = scale(ln.lpe, center=T, scale=T)[,1])
+
+m.cal5 <- glm.nb(hpe ~ size + ln.lpe.sc + size*ln.lpe.sc +
+                   discharge.sc + 
+                   discharge.sc*ln.lpe.sc +
+                  lpe_method + 
+                  substrate_shade, 
+    data=cal5, 
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link="log")
+
+summary(m.cal5)
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+plot((fitted(m.cal5)), residuals(m.cal5, type = "pearson"))
+
+m.cal5.coef <- as.data.frame(summary(m.cal5)$coefficients)
+m.cal5.coef$parameter = row.names(m.cal5.coef)
+colnames(m.cal5.coef)[2] = "std.error"
+
+ggplot(m.cal5.coef[-1,],
+       aes(x = parameter, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+
+m.dredge5 <- dredge(m.cal5, beta = "sd", rank = "AICc")
+m.dredge5
+```
+Discharge is not significant at all in this formulation.
+Decision to stick with "most data rich" and keep Stellako
+
+#### Select Top
+"TOP" in this case, is just the "top" model that also includes Discharge within
+4 AICc of the top-ranked model.
+
+Since there is no interaction between discharge and lpe, I am having a hard-time
+convincing myself that there is a biological reason / connection for the
+slope only model to work...
+
+I guess we can think of it as it is soaking up additional uncertainty after lpe
+is describing most of the relationship?
+```{r}
+m.cal.top <- glm.nb(hpe ~ size + ln.lpe.sc + substrate_shade + discharge.sc, 
+    data=cal, 
+    na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+    link = "log")
+
+summary(m.cal.top)
+# Pearson residual is more appropriate for a glm that doesn't assume gaussian error distribution
+png(file = "./figures/01_Model_Diagnostics/01-06-Discharge-All-Residuals.png",
+    height = 5, width = 5, units = "in", res = 96)
+plot(log(fitted(m.cal.top)), residuals(m.cal.top, type = "pearson"),
+     xlab = "ln(Fitted Values)", ylab = "Pearson Residuals",
+     main = "Specialized (6) - Discharge All Systems Model")
+abline(h = 0)
+dev.off()
+
+# possible outliers
+cal$usid[which(abs(residuals(m.cal.top, type = "pearson"))>3)]
+# Influential Data
+plot(cooks.distance(m.cal.top))
+abline(h = 4/nrow(cal), col = "blue") # Identifies points with High Influence
+abline(h = 3*mean(cooks.distance(m.cal.top)), col = "red")  # Identifies points with High Influence
+# which system-years are possible issues or outliers?
+# high leverage
+cal$usid[which(cooks.distance(m.cal.top) > 3*mean(cooks.distance(m.cal.top)))]
+
+
+m.cal.top.coef <- as.data.frame(summary(m.cal.top)$coefficients)
+m.cal.top.coef$parameter = row.names(m.cal.top.coef)
+colnames(m.cal.top.coef)[2] = "std.error"
+
+ggplot(m.cal.top.coef[-1,],
+       aes(x = reorder_within(parameter, Estimate,
+                              parameter, mean), 
+           y = Estimate)) +
+  geom_point() +
+  scale_x_reordered() +
+  geom_errorbar(aes(ymin = Estimate-std.error, ymax = Estimate+std.error)) +
+  geom_hline(yintercept = 0) +
+  coord_flip() +
+  labs(x = "Parameter")
+
+ggsave("./figures/01_Model_Diagnostics/01-06-Discharge-All-Parameters.png",
+       width = 5, height = 5, dpi = 96)
+
+m.coef <- dplyr::select(m.cal.top.coef, parameter, Estimate, std.error) %>% 
+  arrange(desc(abs(Estimate))) %>% 
+  mutate(cross.zero = ifelse(abs(Estimate) < abs(std.error), "Yes", "No"))
+write.csv(m.coef, file = "./tables/01_06-Discharge-All-Parameters.csv",
+          row.names = F)
+```
+
+## Leave ln Out
+```{r}
+model.test <- data.frame(model=character(),
+                 usid=character(), 
+                 fit=numeric(), 
+                 se.fit=numeric(),
+                 calibrated.estimate=numeric()) 
+```
+
+```{r}
+models <- list(m.cal.top)
+
+saveRDS(m.cal.top, file = "./r_objects/models/All_Systems_Discharge_Model.rds")
+
+specifications_out <- data.frame(model = "All_Systems_Discharge_Model",
+                                 target = c("lpe","lpe","lpe",
+                                            "discharge","discharge","discharge"),
+                                 order = c(1,2,3,
+                                           1,2,3),
+                                 type = c("log","center","scale",
+                                          "system-specific","center","scale"),
+                                 transform = c(NA, mean(cal$ln.lpe), sd(cal$ln.lpe),
+                                               NA, NA, NA))
+
+ec.stations.specs <- dplyr::select(ec.stations, gazetted_stream_name, run_timing_group, mean, sd) %>% 
+  pivot_longer(., cols = c("mean", "sd"), names_to = "type", values_to = "transform" ) %>% 
+  mutate(model = "All_Systems_Discharge_Model",
+         target = paste(gazetted_stream_name, run_timing_group, sep = "-"),
+         order = rep(c(1,2), length.out = nrow(.)),
+         ) %>% 
+  dplyr::select(model, target, order, type, transform)
+
+specifications_out <- rbind(specifications_out, ec.stations.specs)
+
+spec.out <- spec.out %>% 
+  filter(model != "All_Systems_Discharge_Model") %>% 
+  rbind(., specifications_out)
+
+saveRDS(spec.out, file=modout)
+```
+Need to add a running of the model without the ln data point.
+```{r}
+for(j in 1:length(models)){
+  model = models[[j]]
+  for(i in 1:nrow(cal)){
+    m.temp <- glm.nb(as.character(model$call)[2],
+                     data=cal[-i, ],
+                     na.action="na.fail", # https://stackoverflow.com/questions/25281739/dredge-function-error-r-package-mumln
+                     link="log")
+    p.temp <- predict(m.temp, type="link", cal[i, ], se.fit=T)
+    model.test <- rbind(model.test, data.frame(model = as.character(model$call)[2],
+                                 usid = cal$usid[i],
+                                 fit = p.temp$fit,
+                                 se.fit = p.temp$se.fit,
+                                 calibrated.estimate = exp(p.temp$fit)))
+  }
+}
+```
+
+```{r}
+model.rank <- left_join(model.test, 
+                        dplyr::select(cal,
+                                      usid, hpe, watershed_group:year, lpe_method)) %>% 
+  mutate(error = calibrated.estimate - hpe,
+         squared.error = error^2,
+         abs.error = abs(error),
+         per.error = error/hpe,
+         abs.per.error = abs(per.error),
+         rank.set.level = 6)
+
+```
+### Plots
+```{r plot of error}
+model.rank %>% 
+  ggplot(aes(x = hpe, y = error)) +
+  geom_point() +
+  scale_y_continuous(labels = label_comma())
+```
+
+```{r plot of percent error}
+model.rank %>% 
+  ggplot(aes(x = hpe, y = per.error)) +
+  geom_point()
+```
+
+```{r plot of absolute percent error}
+model.rank %>% 
+  ggplot(aes(x = hpe, y = abs.per.error)) +
+  geom_point()
+```
+
+```{r plot of absolute percent error by system}
+set.seed(234)
+model.rank %>% 
+  ggplot(aes(x = reorder(gazetted_stream_name, abs.per.error, FUN = median), 
+             # reorder FUN = median, reorders based on the median
+             y = abs.per.error,
+             colour = model)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_hline(yintercept = 0.5, colour = "grey") +
+  geom_point(position = "jitter", alpha = 0.5) +
+  coord_flip() +
+  labs(title = "All Systems Dishcharge Model Performance",
+       y = "Absolute percent error", x = "Streams",
+       colour = "Model Types")
+
+#ggsave("figures/Model Performance/03_Model_Performance_All_Systems_Discharge.png",
+#       height = 6, width = 8, dpi = 150)
+```
+
+```{r}
+filter(model.rank,
+       abs.per.error > 0.4)
+```
+
+# Save Model Ranks
+```{r}
+saveRDS(model.rank, 
+        "r_objects/03_Model_Ranks_from_All_Systems_Discharge_Model.rds")
+```
+
+```{r}
+count(model.rank, gazetted_stream_name)
+```
+

@@ -1,0 +1,825 @@
+---
+title: "03-01-Model-Code"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+library(scales) # for label_comma()
+```
+
+# Data
+## Models
+```{r}
+# Combining all models into a list called mods
+ # Data path folder for Model Ranks
+r_objects <- "./r_objects/models"
+ # Pull all the data files
+data_path <- dir(r_objects, full.names = TRUE)
+  # Obtain the file names that include .rds, which are the models themselves
+fileNames <- data_path[grep(pattern = ".rds", data_path)]
+ # Create a character string with the Model Names
+individual.names <- sub(pattern = ".*models/", "", fileNames)
+individual.names <- sub(pattern = ".rds", "", individual.names)
+# remove the model_specifications from the individual names and filenames
+individual.names <- individual.names[-which(individual.names == "model_specifications")]
+fileNames <- fileNames[-grep(pattern = "model_specifications", fileNames)]
+
+
+# prime blank list
+mods <- list()
+
+# looping through file names to read in RDS and create a "source" field based on the file name
+for(i in 1:length(fileNames)){
+  mods[[i]] <- readRDS(fileNames[i])
+  names(mods)[i] <- individual.names[i]
+  }
+```
+### Model Specs Functions
+a series of functions for each model type to apply the correct data input
+transformations, model, and fit transformations (either due to a link function
+or other transformation, e.g. Estu model applied a cube root to hpe when the 
+model was fit).
+Using mod.specs to identify what transformations to make for each function.
+```{r}
+# model specifications
+mod.specs <- readRDS("./r_objects/models/model_specifications.rds")
+unique(mod.specs$model)
+
+# blank list to hold functions that apply models and data transformations
+mod.spec.fn <- list()
+```
+#### All_Clarity_Model
+```{r}
+mod.spec.fn$All_Clarity_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe.sc = (log(datin$lpe) - 
+                      mod.specs$transform[mod.specs$model == "All_Clarity_Model" & mod.specs$type == "center"]) / 
+    mod.specs$transform[mod.specs$model == "All_Clarity_Model" & mod.specs$type == "scale"]
+  
+  # Force Substrate Shade to be Medium if it is Dark when size is small and the method is ground
+  if(datin$size == "Small" & datin$lpe_method == "Ground" & datin$substrate_shade == "Dark") datin$substrate_shade = "Medium"
+  
+  # apply model and get predictions (preds)
+  preds <- as.data.frame(predict(mods[["All_Clarity_Model"]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  
+  datin <- mutate(datin,
+                  fit = preds$fit,
+                  se.fit = preds$se.fit,
+                  fit.cv = preds$fit.cv,
+                  calibrated.se.lower = preds$calibrated.se.lower,
+                  calibrated.se.upper = preds$calibrated.se.upper,
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+# annotations above are not repeated for each model function.
+```
+#### SM_Data_Mode
+```{r}
+mod.spec.fn$SM_Data_Model <- function(datin){
+  datin$lnlpe.sc = (log(datin$lpe) - 
+                      mod.specs$transform[mod.specs$model == "SM_Data_Model" & mod.specs$type == "center"]) / 
+    mod.specs$transform[mod.specs$model == "SM_Data_Model" & mod.specs$type == "scale"]
+  
+  preds <- as.data.frame(predict(mods[["SM_Data_Model"]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  
+  return(datin)
+}
+```
+#### LXL_Data_Model
+```{r}
+mod.spec.fn$LXL_Data_Model <- function(datin){
+  datin$lnlpe.sc = (log(datin$lpe) - 
+                      mod.specs$transform[mod.specs$model == "LXL_Data_Model" & mod.specs$type == "center"]) / 
+    mod.specs$transform[mod.specs$model == "LXL_Data_Model" & mod.specs$type == "scale"]
+  
+  preds <- as.data.frame(predict(mods[["LXL_Data_Model"]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  
+  return(datin)
+}
+```
+#### Early_Stu_DeadAlive_Model
+```{r}
+mod.spec.fn$Early_Stu_DeadAlive_Model <- function(datin){
+  datin$Cubelpe.sc = ((datin$lpe)^(1/3) - 
+                      mod.specs$transform[mod.specs$model == "Early_Stu_DeadAlive_Model" & 
+                                            mod.specs$type == "center" & mod.specs$target == "lpe"]) / 
+    mod.specs$transform[mod.specs$model == "Early_Stu_DeadAlive_Model" & 
+                          mod.specs$type == "scale" & mod.specs$target == "lpe"]
+  datin$Cubedeadvlive.sc = ( (datin$ground_carcs_total_above/datin$peak_live_above)^(1/3) - 
+                      mod.specs$transform[mod.specs$model == "Early_Stu_DeadAlive_Model" & 
+                                            mod.specs$type == "center" & mod.specs$target == "deadvlive"]) / 
+    mod.specs$transform[mod.specs$model == "Early_Stu_DeadAlive_Model" & 
+                          mod.specs$type == "scale" & mod.specs$target == "deadvlive"]
+  
+  preds <- as.data.frame(predict(mods[["Early_Stu_DeadAlive_Model"]], type="response", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = (fit-se.fit)^3,
+                calibrated.se.upper = (fit+se.fit)^3,
+                calibrated.estimate = fit^3)
+  
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  
+  return(datin)
+}
+```
+
+#### All_Systems_Discharge_Model
+```{r}
+# HERE #
+mod.spec.fn$All_Systems_Discharge_Model <- function(datin){
+  center <- mod.specs$transform[mod.specs$model == "All_Systems_Discharge_Model" &
+                                 mod.specs$target == paste(datin$gazetted_stream_name, datin$run_timing_group, sep = "-") &
+                                mod.specs$type == "mean"]
+  sd <- mod.specs$transform[mod.specs$model == "All_Systems_Discharge_Model" &
+                                 mod.specs$target == paste(datin$gazetted_stream_name, datin$run_timing_group, sep = "-") &
+                                mod.specs$type == "sd"]
+  
+  datin$ln.lpe.sc = (log(datin$lpe) - 
+                      mod.specs$transform[mod.specs$model == "All_Systems_Discharge_Model" & 
+                                            mod.specs$type == "center" & mod.specs$target == "lpe"]) / 
+    mod.specs$transform[mod.specs$model == "All_Systems_Discharge_Model" & 
+                          mod.specs$type == "scale" & mod.specs$target == "lpe"]
+  datin$discharge.sc = ( datin$water_discharge - center ) / sd
+  
+  preds <- as.data.frame(predict(mods[["All_Systems_Discharge_Model"]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  
+  return(datin)
+}
+```
+#### Stellako_Discharge_Model
+```{r}
+mod.spec.fn$Stellako_Discharge_Model <- function(datin){
+  datin$lnlpe.sc = ( log(datin$lpe) - 
+                      mod.specs$transform[mod.specs$model == "Stellako_Discharge_Model" & 
+                                            mod.specs$type == "center" & mod.specs$target == "lpe"]) / 
+    mod.specs$transform[mod.specs$model == "Stellako_Discharge_Model" & 
+                          mod.specs$type == "scale" & mod.specs$target == "lpe"]
+  datin$discharge.sc = ( datin$water_discharge - 
+                      mod.specs$transform[mod.specs$model == "Stellako_Discharge_Model" & 
+                                            mod.specs$type == "center" & mod.specs$target == "discharge"]) /
+    mod.specs$transform[mod.specs$model == "Stellako_Discharge_Model" & 
+                          mod.specs$type == "scale" & mod.specs$target == "discharge"]
+  
+  preds <- as.data.frame(predict(mods[["Stellako_Discharge_Model"]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  
+  return(datin)
+}
+```
+#### Individual_Data_Model
+```{r}
+mod.spec.fn$Individual_Data_Model <- function(datin, mod.i){
+  # apply data input transformations
+  datin$lnlpe.sc = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  preds <- as.data.frame(predict(mods[[mod.i]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+#### All_Minimal_Model
+```{r}
+mod.spec.fn$All_Minimal_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe.sc = (log(datin$lpe) - 
+                      mod.specs$transform[mod.specs$model == "All_Minimal_Model" & mod.specs$type == "center"]) / 
+    mod.specs$transform[mod.specs$model == "All_Minimal_Model" & mod.specs$type == "scale"]
+  
+  # apply model and get predictions (preds)
+  preds <- as.data.frame(predict(mods[["All_Minimal_Model"]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### All_ROM_GenB_Model
+```{r}
+mod.spec.fn$All_ROM_GenB_Model <- function(datin){
+  # apply data input transformations
+ datin$lnlpe = log(datin$lpe)
+   # apply model and get predictions (preds)
+  preds <- data.frame(fit = mods[["All_ROM_GenB_Model"]]$rom*datin$lnlpe,
+                      se.fit = datin$lnlpe*mods[["All_ROM_GenB_Model"]]$se)
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                  calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### All_ROM_Gen_Model
+```{r}
+mod.spec.fn$All_ROM_Gen_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = log(datin$lpe)
+ grouping <- paste("All", datin$lpe_method, sep = ".")
+ grouping.row = which(mods[["All_ROM_Gen_Model"]]$grouping == grouping)
+   # apply model and get predictions (preds)
+  preds <- data.frame(fit = mods[["All_ROM_Gen_Model"]]$rom[grouping.row]*datin$lnlpe,
+                      se.fit = datin$lnlpe*mods[["All_ROM_Gen_Model"]]$se[grouping.row])
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                  calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### All_ROM_Agg_Model
+```{r}
+mod.spec.fn$All_ROM_Agg_Model <- function(datin){
+  # apply data input transformations
+ grouping <- paste(datin$aggr, datin$lpe_method, sep = ".")
+ grouping.row = which(mods[["All_ROM_Agg_Model"]]$grouping == grouping)
+ datin$lnlpe = log(datin$lpe)
+   # apply model and get predictions (preds)
+  preds <- data.frame(fit = mods[["All_ROM_Agg_Model"]]$rom[grouping.row]*datin$lnlpe,
+                      se.fit = datin$lnlpe*mods[["All_ROM_Agg_Model"]]$se[grouping.row])
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  se.fit = se.fit, # placeholder need to EDIT
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+    datin <- mutate(datin,
+                  fit = preds$fit,
+                  se.fit = preds$se.fit,
+                  fit.cv = preds$fit.cv,
+                  calibrated.se.lower = preds$calibrated.se.lower,
+                  calibrated.se.upper = preds$calibrated.se.upper,
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### All_ROM_Size_Model
+```{r}
+mod.spec.fn$All_ROM_Size_Model <- function(datin){
+  # apply data input transformations
+ grouping <- paste(datin$size, datin$lpe_method, sep = ".")
+   grouping.row = which(mods[["All_ROM_Size_Model"]]$grouping == grouping)
+   datin$lnlpe = log(datin$lpe)
+   # apply model and get predictions (preds)
+  preds <- data.frame(fit = mods[["All_ROM_Size_Model"]]$rom[grouping.row]*datin$lnlpe,
+                      se.fit = datin$lnlpe*mods[["All_ROM_Size_Model"]]$se[grouping.row])
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  se.fit = se.fit, # placeholder need to EDIT
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- datin <- mutate(datin,
+                  fit = preds$fit,
+                  se.fit = preds$se.fit,
+                  fit.cv = preds$fit.cv,
+                  calibrated.se.lower = preds$calibrated.se.lower,
+                  calibrated.se.upper = preds$calibrated.se.upper,
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### MoR_LM_Clarity_Model
+```{r}
+mod.spec.fn$MoR_LM_Clarity_Model <- function(datin){
+  # apply model and get predictions (preds)
+  # In this case, it is predicting the ratio
+  datin$lnlpe = log(datin$lpe)
+  preds <- as.data.frame(predict(mods[["MoR_LM_Clarity_Model"]], 
+                      datin,
+                      re.form=NA, se.fit=T))
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  fit = fit*datin$lpe,
+                  se.fit = se.fit*datin$lpe,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = (fit-se.fit),
+                calibrated.se.upper = (fit+se.fit),
+                calibrated.estimate = (fit))
+  # attach results to data input file
+  datin <- mutate(datin,
+                  fit = preds$fit,
+                  se.fit = preds$se.fit,
+                  fit.cv = preds$fit.cv,
+                  calibrated.se.lower = preds$calibrated.se.lower,
+                  calibrated.se.upper = preds$calibrated.se.upper,
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### MoR_Clarity_Model
+```{r}
+mod.spec.fn$MoR_Clarity_Mode <- function(datin){
+  # apply data input transformations
+ # apply data input transformations
+ datin$lnlpe = log(datin$lpe)
+  modf <- mods[["MoR_Clarity_Model"]] %>% 
+    dplyr::filter(lpe_method == datin$lpe_method,
+                  size == datin$size,
+                  water_clarity == datin$water_clarity)
+  
+     # apply model and get predictions (preds)
+  preds <- data.frame(fit = modf$MoR*datin$lpe,
+                      se.fit = modf$MoR.SD*datin$lpe)
+  
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  se.fit = se.fit,
+                fit.cv = round2(se.fit / fit * 100, 1),
+                calibrated.se.lower = (fit-se.fit),
+                calibrated.se.upper = (fit+se.fit),
+                calibrated.estimate = (fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### MoR_Low_Abundance_Models
+```{r}
+mod.spec.fn$MoR_Low_Abundance_Models <- function(datin){
+  # apply data input transformations
+ # apply data input transformations
+ datin$lnlpe = log(datin$lpe)
+  modf <- mods[["MoR_Low_Abundance_Models"]] %>% 
+    dplyr::filter(lpe_method == datin$lpe_method,
+                  water_clarity == datin$water_clarity)
+  
+     # apply model and get predictions (preds)
+  preds <- data.frame(fit = modf$MoR*datin$lpe,
+                      se.fit = modf$MoR.SD*datin$lpe)
+  
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  se.fit = se.fit,
+                fit.cv = round2(se.fit / fit * 100, 1),
+                calibrated.se.lower = (fit-se.fit),
+                calibrated.se.upper = (fit+se.fit),
+                calibrated.estimate = (fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### RoM_Clarity_Model
+```{r}
+mod.spec.fn$RoM_Clarity_Model <- function(datin){
+  # apply data input transformations
+ # apply data input transformations
+ datin$lnlpe = log(datin$lpe)
+  modf <- mods[["RoM_Clarity_Model"]] %>% 
+    dplyr::filter(lpe_method == datin$lpe_method,
+                  size == datin$size,
+                  water_clarity == datin$water_clarity)
+  
+     # apply model and get predictions (preds)
+  preds <- data.frame(fit = modf$RoM*datin$lpe,
+                      se.fit = modf$RoM.SD)
+  
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                  se.fit = se.fit, # placeholder need to EDIT
+                fit.cv = round2(se.fit / fit * 100, 1),
+                calibrated.se.lower = (fit-se.fit),
+                calibrated.se.upper = (fit+se.fit),
+                calibrated.estimate = (fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+#### Inverse Models
+```{r}
+cal_4apply <- function(y0, # Low Precision Estimate
+                       mod, # simple linear model 
+                       mean.res=FALSE, interval="Wald")
+  # Apply calibration function from INVESTR PACKAGE
+{
+  x0 <- investr::calibrate(mod,y0,interval=interval, mean.response = mean.res)
+  return(x0[1:4]) # return the High Precision estimate, confidence interval, and Standard Error
+}
+
+saveRDS(cal_4apply, "./r_objects/03_cal_4apply.rds")
+```
+##### Inverse_LXL_Aerial_Data_Model
+```{r}
+mod.spec.fn$Inverse_LXL_Aerial_Data_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  m.temp <- mods$Inverse_LXL_Aerial_Data_Model
+    
+    p.temp <- matrix(unlist(t(sapply(cal.noL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    preds <- data.frame(fit = p.temp$fit,
+                        se.fit = p.temp$se.fit)
+
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+##### Inverse_LXL_Both_Data_Model
+```{r}
+mod.spec.fn$Inverse_LXL_Both_Data_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  m.temp <- mods$Inverse_LXL_Both_Data_Model
+    
+    p.temp <- matrix(unlist(t(sapply(cal.noL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    preds <- data.frame(fit = p.temp$fit,
+                        se.fit = p.temp$se.fit)
+
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+##### Inverse_LXL_Ground_Data_Model
+```{r}
+mod.spec.fn$Inverse_LXL_Ground_Data_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  m.temp <- mods$Inverse_LXL_Ground_Data_Model
+    
+    p.temp <- matrix(unlist(t(sapply(cal.noL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    preds <- data.frame(fit = p.temp$fit,
+                        se.fit = p.temp$se.fit)
+
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+##### Inverse_SM_Aerial_Data_Model
+```{r}
+mod.spec.fn$Inverse_SM_Aerial_Data_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  m.temp <- mods$Inverse_SM_Aerial_Data_Model
+    
+    p.temp <- matrix(unlist(t(sapply(cal.noL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    preds <- data.frame(fit = p.temp$fit,
+                        se.fit = p.temp$se.fit)
+
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+##### Inverse_SM_Both_Data_Model
+```{r}
+mod.spec.fn$Inverse_SM_Both_Data_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  m.temp <- mods$Inverse_SM_Both_Data_Model
+    
+    p.temp <- matrix(unlist(t(sapply(cal.noL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    preds <- data.frame(fit = p.temp$fit,
+                        se.fit = p.temp$se.fit)
+
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+##### Inverse_SM_Ground_Data_Model
+```{r}
+mod.spec.fn$Inverse_SM_Ground_Data_Model <- function(datin){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  m.temp <- mods$Inverse_SM_Ground_Data_Model
+    
+    p.temp <- matrix(unlist(t(sapply(cal.noL$lnlpe[i], cal_4apply, mod=m.temp))), ncol = 4)
+    p.temp <- as.data.frame( p.temp )
+    colnames(p.temp) <- c("fit", "lower", "upper", "se.fit")
+    
+    preds <- data.frame(fit = p.temp$fit,
+                        se.fit = p.temp$se.fit)
+
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(datin)
+}
+```
+
+#### Individual_Inverse_Data_Model
+```{r}
+mod.spec.fn$Individual_Inverse_Data_Model <- function(datin, mod.i){
+  # apply data input transformations
+  datin$lnlpe = (log(datin$lpe))
+  
+  # apply model and get predictions (preds)
+  preds <- as.data.frame(predict(mods[[mod.i]], type="link", 
+                   dplyr::select(datin, -gazetted_stream_name),
+                      re.form=NA, se.fit=T))
+  # apply data transformations to predictions (calibrated.estimates) to get error bounds.
+  preds <- mutate(preds,
+                fit.cv = round2(sqrt(exp(se.fit^2)-1)*100,1),
+                calibrated.se.lower = exp(fit-se.fit),
+                calibrated.se.upper = exp(fit+se.fit),
+                calibrated.estimate = exp(fit))
+  # attach results to data input file
+  datin <- mutate(datin,                   
+                  fit = preds$fit,                   
+                  se.fit = preds$se.fit,                   
+                  fit.cv = preds$fit.cv,                   
+                  calibrated.se.lower = preds$calibrated.se.lower,                   
+                  calibrated.se.upper = preds$calibrated.se.upper,                   
+                  calibrated.estimate = preds$calibrated.estimate)
+  # return the data input file with predictions attached.
+  return(dSatin)
+}
+```
+
+# Save Model Function List
+```{r}
+saveRDS(mod.spec.fn, "./r_objects/03_mod_spec_fn.rds")
+saveRDS(mods, "./r_objects/03_mods.rds")
+```
+

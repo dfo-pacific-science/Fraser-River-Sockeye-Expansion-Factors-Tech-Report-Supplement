@@ -1,0 +1,1261 @@
+---
+title: "03-03-Calibrated-Summaries"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # for label_comma()
+library(stringr) # str_extract
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+library(car) # leveneTest
+library(rstatix) # pairwise, identify_outliers
+library(lmtest) # lrtest(), likelihood ratio test
+cal_4apply <- readRDS("./r_objects/03_cal_4apply.rds")
+mods <- readRDS("./r_objects/03_mods.rds")
+mod.spec.fn <- readRDS("./r_objects/03_mod_spec_fn.rds")
+mod.specs <- readRDS("./r_objects/models/model_specifications.rds")
+```
+
+# Data
+## Model Selection Results
+Reading in the model selection results.
+```{r}
+mod.select.full <- readRDS(file = "./r_objects/02_01_rank_combined_results.rds") %>% 
+  filter(special.level != 4.5)
+mod.selection <- readRDS(file = "./r_objects/02_01_rank_top_results.rds")
+mod.selection <- filter(mod.selection,
+                        keep == TRUE)
+```
+
+### Model summaries
+```{r}
+# Models that passed
+mod.selection %>% 
+  filter(!str_detect(sys.meth.set, "All_Systems_Discharge")) %>% 
+  ungroup() %>% 
+  count(top.model)
+
+# add a relative rank within each rank-set
+mod.select.full <- mod.select.full %>% 
+  group_by(sys.meth.set) %>% 
+  mutate(rank = rank(rel.sum))
+
+# count of model occurrence within the top 5
+mod.select.full %>% 
+  filter(rank <= 5) %>% 
+  ungroup() %>% 
+  count(source) %>% 
+  arrange(n) %>% 
+  print(., n = 30)
+
+# count of model occurrence within the top 5 excluding the top
+mod.select.full %>% 
+  filter(rank <= 5,
+         rank != 1) %>% 
+  ungroup() %>% 
+  count(source) %>% 
+  arrange(n)
+
+# count of model occurrence second from the top
+mod.select.full %>% 
+  filter(rank == 2) %>% 
+  ungroup() %>% 
+  count(source) %>% 
+  arrange(n)
+
+mod.select.full %>% 
+  count(sys.meth.set)
+```
+
+## Calibration Set & Data
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")
+
+cal <- cal %>% 
+  mutate(aggr = ifelse(size %in% c("Large", "X-Large"), "LONLY", "NoL"),
+         water_clarity = ifelse(water_clarity == "Pt_Turb_Tannic", 
+                                       "Turbid/Tannic", water_clarity))
+
+cal.out <- readRDS("./r_objects/03_02_calibrated_series.rds") %>% 
+  mutate(water_clarity = ifelse(water_clarity == "Pt_Turb_Tannic", "Turbid/Tannic", water_clarity),
+         usid = paste(gazetted_stream_name, year, lpe_method, sep = "-"))
+cal.out.long <- readRDS("./r_objects/03_02_calibrated_series_long.rds") %>% 
+  mutate(water_clarity = ifelse(water_clarity == "Pt_Turb_Tannic", "Turbid/Tannic", water_clarity),
+         usid = paste(gazetted_stream_name, year, lpe_method, sep = "-"),
+         usid2 = paste(gazetted_stream_name, year, lpe_method, type, sep = "-"),
+         type = as.factor(type),
+         abin = as.factor(abin))
+```
+### Relative to 1.8
+```{r}
+cal.out <- cal.out %>% 
+  mutate(water_clarity = ifelse(water_clarity == "Pt_Turb_Tannic", "Turbid/Tannic", water_clarity),
+         calibrated.ci.lower = case_when(
+           calibration.model == "Early_Stu_DeadAlive_Model" ~ (fit - se.fit*1.96)^3,
+           TRUE ~ exp(fit - se.fit*1.96)
+         ),
+         calibrated.ci.upper = case_when(
+           calibration.model == "Early_Stu_DeadAlive_Model" ~ (fit + se.fit*1.96)^3,
+           TRUE ~ exp(fit + se.fit*1.96)
+         ),
+         per.change.class = (calibrated.estimate - classic)/classic,
+         abs.per.change.class = abs(per.change.class),
+         is.classic.in.se = classic >= calibrated.se.lower & classic <= calibrated.se.upper,
+         is.per.change.within = abs.per.change.class < 0.15,
+         is.hpe.within.se = hpe >= calibrated.se.lower & hpe <= calibrated.se.upper,
+         is.hpe.within.ci = hpe >= calibrated.ci.lower & hpe <= calibrated.ci.upper,
+         is.both.true = is.classic.in.se == TRUE & is.per.change.within == TRUE,
+         calibrated.difference = calibrated.estimate - hpe,
+         classic.difference = classic - hpe,
+         calibrated.difference.ln = log(calibrated.estimate) - log(hpe),
+         #ln.calibrated.difference = log(calibrated.difference),
+         classic.difference.ln = log(classic) - log(hpe),
+         #ln.classic.difference = log(classic.difference),
+         per.error = calibrated.difference / hpe,
+         classic.per.error = classic.difference / hpe,
+         abs.per.error = abs(per.error),
+         classic.abs.per.error = abs(classic.per.error),
+         cal.cv = (calibrated.se.upper - calibrated.se.lower) / calibrated.estimate,
+         true.CV = sqrt(exp(se.fit^2)-1))
+```
+
+# Summary Statistics
+```{r}
+cal.out.summary.bins <- cal.out.long %>% 
+  group_by(abin, type) %>% 
+  summarise(n = n(),
+            MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            R.Cor = cor(estimate, hpe, method = "pearson"),
+            total.expanded = sum(estimate),
+            avg.high.accuracy = mean(hpe))
+
+cal.out.summary <- cal.out.long %>% 
+  group_by(abin = "All", type) %>% 
+  summarise(n = n(),
+            MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            R.Cor = cor(estimate, hpe, method = "pearson"),
+            total.expanded = sum(estimate),
+            avg.high.accuracy = mean(hpe)) %>% 
+  rbind(., cal.out.summary.bins) %>% 
+  mutate(MPE = round2(MPE*100, 1),
+         MAPE = round2(MAPE*100, 1),
+         RMSE = round2(RMSE, 0),
+         R.Cor = round2(R.Cor*100, 1),
+         total.expanded = round2(total.expanded, 0),
+         avg.high.accuracy = round2(avg.high.accuracy, 0)) ; cal.out.summary
+```
+## Outliers
+```{r}
+cal.out.high.error <- filter(cal.out,
+                             abs.per.error > 0.5)
+
+# Summary statistics reported in the report.
+# # Aerial outliers
+cal.out.high.error %>% count(lpe_method) %>% mutate(n / sum(n))
+# Aerial Occurrence in database
+cal.out %>% count(lpe_method) %>% mutate(n / sum(n))
+# Water Clarity Outliers
+cal.out.high.error %>% count(water_clarity) %>% mutate(n / sum(n))
+# Clarity occurrence in database
+cal.out %>% count(water_clarity) %>% mutate(n / sum(n))
+# Size Outliers
+cal.out.high.error %>% count(size) %>% mutate(n / sum(n))
+# Size occurrence in database
+cal.out %>% count(size) %>% mutate(n / sum(n))
+
+cal.out.high.error %>% count(lpe_method, water_clarity) %>% mutate(n / sum(n))
+cal.out %>% count(lpe_method, water_clarity) %>% mutate(n / sum(n))
+
+# Summary of Outliers by Model
+cal.out.high.error %>% count(calibration.model) %>% 
+  mutate(prop = n / sum(n)) %>% 
+  select(-n) %>% 
+  left_join(., cal.out %>% count(calibration.model) %>% mutate(prop2 = n / sum(n))) %>% 
+  mutate(diff = (prop - prop2)*100)
+
+# By Model and method / clarity
+cal.out.high.error %>% 
+  group_by(lpe_method, water_clarity, size, gazetted_stream_name, calibration.model) %>% 
+  summarize(high.error = n()) %>% 
+  left_join(count(cal, lpe_method, water_clarity, gazetted_stream_name)) %>% 
+  mutate(per.high = high.error/n*100) %>% 
+  arrange(lpe_method, desc(per.high)) 
+
+# Default 1.8 number of outliers
+filter(cal.out.long, type == "historical", abs.per.error > 0.5) %>% 
+  count()
+
+# number of overlapping outliers
+filter(cal.out.long, abs.per.error > 0.5) %>% 
+  count(usid) %>% filter(n == 2)
+# number of new outliers
+23-12
+
+# percent remained outliers
+12 / 28
+
+# non-overlapping outliers
+cal.out.high.error %>% 
+  filter(!usid %in% cal.out.long$usid[cal.out.long$type == "historical" & 
+                                         cal.out.long$abs.per.error > 0.5]) %>% 
+  count(size, lpe_method, water_clarity)
+
+# Aerial
+9/11
+```
+
+## Precision
+```{r}
+# Count of high accuracy estimates within SE and CI
+count(cal.out, is.hpe.within.se) %>%  mutate(n / sum(n))
+count(cal.out, is.hpe.within.ci) %>%  mutate(n / sum(n))
+
+# Average CV of estimates with hpe within SE and CI
+cal.out %>% group_by(is.hpe.within.se) %>% 
+  summarise(mean.cv = mean(fit.cv))
+cal.out %>% group_by(is.hpe.within.ci) %>% 
+  summarise(mean.cv = mean(fit.cv))
+
+# Summary of outliers CVs and if they captured the true estimate.
+cal.out %>% filter(abs.per.error > 0.5) %>% 
+  group_by(is.hpe.within.se) %>% 
+  summarise(n = n(), mean.cv = mean(fit.cv)) %>%  mutate(n / sum(n))
+cal.out %>% filter(abs.per.error > 0.5) %>% 
+  group_by(is.hpe.within.ci) %>% 
+  summarise(n = n(), mean.cv = mean(fit.cv))  %>% mutate(n / sum(n))
+
+# Precision Summary
+count(cal.out, water_clarity, is.hpe.within.se) %>%  
+  group_by(water_clarity) %>% 
+  mutate(n / sum(n))
+
+count(cal.out, lpe_method, is.hpe.within.se) %>%  
+  group_by(lpe_method) %>% 
+  mutate(n / sum(n))
+
+count(cal.out, size, is.hpe.within.se) %>%  
+  group_by(size) %>% 
+  mutate(n / sum(n))
+
+count(cal.out, calibration.model, is.hpe.within.se) %>% 
+  filter(is.hpe.within.se == FALSE) %>% 
+  mutate(prop = n / 162)
+
+lm.precision <- lm(fit.cv ~ is.hpe.within.se, data = cal.out)
+summary(lm.precision)
+
+
+cal.out %>% group_by(is.hpe.within.se) %>% 
+  summarise(mean.cv = mean(true.CV))
+
+cal.out %>% group_by(is.hpe.within.ci) %>% 
+  summarise(mean.cv = mean(fit.cv))
+
+ggplot(cal.out, 
+       aes(x = is.hpe.within.se, y = fit.cv)) +
+  geom_boxplot()
+
+lm.precision.model <- lm(fit.cv ~ calibration.model, data = cal.out)
+summary(lm.precision.model)
+
+ggplot(cal.out, 
+       aes(x = calibration.model, y = fit.cv,
+           fill = is.hpe.within.se)) +
+  geom_boxplot()
+
+
+ggplot(cal.out, 
+       aes(x = log(calibrated.estimate), y = is.hpe.within.se,
+           colour = calibration.model)) +
+  geom_point()
+```
+
+## Performance Metrics
+By Abundance Bins and Water Clarity
+```{r}
+cal.out.summary.wc <- cal.out.long %>% 
+  group_by(abin, type, water_clarity) %>% 
+  summarise(n= n(),
+            MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            R.Cor = cor(estimate, hpe, method = "pearson"),
+            total.expanded = sum(estimate),
+            avg.high.accuracy = mean(hpe)) %>% 
+  mutate(MPE = round2(MPE*100, 1),
+         MAPE = round2(MAPE*100, 1),
+         RMSE = round2(RMSE, 0),
+         R.Cor = round2(R.Cor*100, 1),
+         total.expanded = round2(total.expanded, 0),
+         avg.high.accuracy = round2(avg.high.accuracy, 0)) ; cal.out.summary.wc
+
+write.csv(cal.out.summary.wc, 
+          file = "./tables/03_03-Comparison with Historical Summary Table with Water Clarity.csv",
+          row.names = F)
+
+p.MPE <- ggplot(cal.out.long,
+                aes(x = abin, y = per.error,
+                     fill = type)) +
+    geom_hline(yintercept = 0) +
+  geom_boxplot(alpha = 0.85) +
+  facet_wrap(~water_clarity) +
+  scale_fill_manual(name = "Estimate",
+                    values = c("salmon", "grey")) +
+  labs(x = "Abundance Bin", y = "Percent Error") ; p.MPE
+
+p.MAPE <- ggplot(cal.out.long,
+                aes(x = abin, y = abs.per.error,
+                     fill = type)) +
+  geom_boxplot(alpha = 0.85) +
+  facet_wrap(~water_clarity) +
+  scale_fill_manual(name = "Estimate",
+                    values = c("salmon", "grey")) +
+  #geom_hline(yintercept = 0) +
+  labs(x = "Abundance Bin", y = "Absolute Percent Error") ; p.MAPE
+```
+
+### Combined
+```{r}
+cal.out.summary$water_clarity <- "Combined"
+cal.out.summary.combined <- rbind(cal.out.summary.wc, cal.out.summary) %>% 
+  mutate(water_clarity = factor(water_clarity,
+                                levels = c("Clear", "Turbid/Tannic", "Combined"
+                                ))) %>% 
+  arrange(abin, water_clarity)
+
+write.csv(cal.out.summary.combined, 
+          file = "./tables/03_03-Comparison-with-Historical-Summary-Table-Combined.csv",
+          row.names = F)
+```
+
+### Extra Detail
+```{r}
+cal.out.summary.extra <- cal.out.long %>% 
+  group_by(abin, type, size, water_clarity) %>% 
+  summarise(n= n(),
+            MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            total.expanded = sum(estimate),
+            avg.high.accuracy = mean(hpe)) %>% 
+  mutate(MPE = round2(MPE*100, 1),
+         MAPE = round2(MAPE*100, 1),
+         RMSE = round2(RMSE, 0),
+         total.expanded = round2(total.expanded, 0),
+         avg.high.accuracy = round2(avg.high.accuracy, 0)) ; cal.out.summary.extra
+
+cal.out.summary.extra <- cal.out.summary.extra %>% 
+  mutate(water_clarity = factor(water_clarity,
+                                levels = c("Clear", "Turbid/Tannic", "Combined"
+                                )),
+         size = factor(size,
+                       levels = c("Small", "Medium",
+                                  "Large", "X-Large"))) %>% 
+  arrange(abin, size, water_clarity)
+
+write.csv(cal.out.summary.extra, 
+          file = "./tables/03_03-Comparison-with-Historical-Summary-Table-Extra.csv",
+          row.names = F)
+```
+
+```{r}
+cal.out.summary.extra <- cal.out.long %>% 
+  group_by(abin, type, size, lpe_method, water_clarity) %>% 
+  summarise(n= n(),
+            MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            total.expanded = sum(estimate),
+            avg.high.accuracy = mean(hpe)) %>% 
+  mutate(MPE = round2(MPE*100, 1),
+         MAPE = round2(MAPE*100, 1),
+         RMSE = round2(RMSE, 0),
+         total.expanded = round2(total.expanded, 0),
+         avg.high.accuracy = round2(avg.high.accuracy, 0)) ; cal.out.summary.extra
+
+cal.out.summary.extra <- cal.out.summary.extra %>% 
+  mutate(water_clarity = factor(water_clarity,
+                                levels = c("Clear", "Turbid/Tannic", "Combined"
+                                )),
+         size = factor(size,
+                       levels = c("Small", "Medium",
+                                  "Large", "X-Large"))) %>% 
+  arrange(abin, size, lpe_method, water_clarity)
+
+write.csv(cal.out.summary.extra, 
+          file = "./tables/03_03-Comparison-with-Historical-Summary-Table-Extra-Method.csv",
+          row.names = F)
+```
+
+
+### ANOVAs and T-Tests
+#### Percent Error
+```{r}
+cal.lm.mpe <- lm(per.error ~ 0 + type*abin, data = cal.out.long)
+summary(cal.lm.mpe)
+
+plot(fitted(cal.lm.mpe), residuals(cal.lm.mpe))
+abline(h = 0)
+
+plot(cal.lm.mpe)
+
+aov.mpe <- aov(per.error ~ type*abin, data = cal.out.long)
+summary(aov.mpe)
+TukeyHSD(aov.mpe, which = c("type", "abin"))
+
+# outliers?
+cal.out.long %>%
+     group_by(abin, type) %>%
+     identify_outliers(per.error) %>% 
+  filter(type == "updated")
+
+# Homogeneity of variance test from https://www.datanovia.com/en/lessons/mixed-anova-in-r/#post-hoc-tests
+cal.out.long %>%
+  group_by(abin) %>%
+  levene_test(per.error ~ type)
+
+pair.mpe <- cal.out.long %>%
+  group_by(abin) %>%
+  pairwise_t_test(per.error ~ type, paired = TRUE, 
+                  p.adjust.method = "bonferroni")
+pair.mpe
+
+t.mpe <- cal.out.long %>%
+ # group_by(abin, type) %>%
+  t_test(per.error~type, paired = TRUE)
+t.mpe
+
+# Updated relative to zero
+t.mpe.0u <- cal.out.long %>%
+  filter(type == "updated") %>%
+  t_test(per.error ~ 1, mu = 0)
+t.mpe.0u
+
+# Default relative to zero
+t.mpe.0d <- cal.out.long %>%
+  filter(type == "historical") %>%
+  t_test(per.error ~ 1, mu = 0)
+t.mpe.0d
+
+# Updated by Abuns relative to zero
+pair.mpe.0u <- cal.out.long %>%
+  filter(type == "updated") %>% 
+  group_by(abin) %>%
+  t_test(per.error ~ 1, mu = 0)
+pair.mpe.0u
+
+# Default by Abuns relative to zero
+pair.mpe.0d <- cal.out.long %>%
+  filter(type == "historical") %>% 
+  group_by(abin) %>%
+  t_test(per.error ~ 1, mu = 0)
+pair.mpe.0d
+
+lm.mpe.dat <- expand.grid(abin = unique(cal.out.long$abin),
+                       type = unique(cal.out.long$type)) %>% 
+  mutate(abin = as.character(abin),
+         type = as.character(type))
+
+lm.mpe.dat <- cbind(lm.mpe.dat, 
+                 as.data.frame(
+                   predict(cal.lm.mpe, newdata = lm.mpe.dat, 
+                           type = "response", se.fit = TRUE)
+                   )
+                 )
+```
+#### Absolute Percent Error
+```{r}
+cal.lm.mape <- lm(abs.per.error ~ type*abin, data = cal.out.long)
+summary(cal.lm.mape)
+
+plot(fitted(cal.lm.mape), residuals(cal.lm.mape))
+abline(h = 0)
+
+# plot(cal.lm.mape)
+
+aov.mape <- aov(abs.per.error ~ type*abin, data = cal.out.long)
+summary(aov.mape)
+TukeyHSD(aov.mape, which = c("type", "abin"))
+
+# outliers?
+cal.out.long %>%
+     group_by(abin, type) %>%
+     identify_outliers(abs.per.error) %>% 
+  filter(type == "updated")
+
+# Homogeneity of variance test from https://www.datanovia.com/en/lessons/mixed-anova-in-r/#post-hoc-tests
+cal.out.long %>%
+  group_by(abin) %>%
+  levene_test(abs.per.error ~ type)
+
+pair.mape <- cal.out.long %>%
+  group_by(abin) %>%
+  pairwise_t_test(abs.per.error ~ type, paired = TRUE, 
+                  p.adjust.method = "bonferroni")
+pair.mape
+
+t.mape <- cal.out.long %>%
+ # group_by(abin, type) %>%
+  t_test(abs.per.error~type, paired = TRUE)
+t.mape
+
+# Updated relative to zero
+t.mape.0u <- cal.out.long %>%
+  filter(type == "updated") %>%
+  t_test(abs.per.error ~ 1, mu = 0, alternative = "greater")
+t.mape.0u
+
+# Default relative to zero
+t.mape.0d <- cal.out.long %>%
+  filter(type == "historical") %>%
+  t_test(abs.per.error ~ 1, mu = 0, alternative = "greater")
+t.mape.0d
+
+# Updated by Abuns relative to zero
+pair.mape.0u <- cal.out.long %>%
+  filter(type == "updated") %>% 
+  group_by(abin) %>%
+  t_test(abs.per.error ~ 1, mu = 0, alternative = "greater")
+pair.mape.0u
+
+# Default by Abuns relative to zero
+pair.mape.0d <- cal.out.long %>%
+  filter(type == "historical") %>% 
+  group_by(abin) %>%
+  t_test(abs.per.error ~ 1, mu = 0, alternative = "greater")
+pair.mape.0d
+
+lm.mape.dat <- expand.grid(abin = unique(cal.out.long$abin),
+                       type = unique(cal.out.long$type)) %>% 
+  mutate(abin = as.character(abin),
+         type = as.character(type))
+
+lm.mape.dat <- cbind(lm.mape.dat, 
+                 as.data.frame(
+                   predict(cal.lm.mape, newdata = lm.mape.dat, 
+                           type = "response", se.fit = TRUE)
+                   )
+                 )
+```
+
+### LM + Water Clarity
+#### Percent Error
+```{r}
+cal.lm.mpe.wc <- lm(per.error ~ type*abin*water_clarity, data = cal.out.long)
+summary(cal.lm.mpe.wc)
+
+plot(fitted(cal.lm.mpe.wc), residuals(cal.lm.mpe.wc))
+abline(h = 0)
+
+# plot(cal.lm.mpe.wc)
+
+aov.mpe.wc <- aov(per.error ~ type*abin*water_clarity, data = cal.out.long)
+summary(aov.mpe.wc)
+TukeyHSD(aov.mpe.wc, which = c("type", "abin", "water_clarity"))
+
+# outliers?
+cal.out.long %>%
+     group_by(abin, water_clarity, type) %>%
+     identify_outliers(per.error) %>% 
+  filter(type == "updated")
+
+# Homogeneity of variance test from https://www.datanovia.com/en/lessons/mixed-anova-in-r/#post-hoc-tests
+cal.out.long %>%
+  group_by(abin, water_clarity) %>%
+  levene_test(per.error ~ type)
+
+pair.mpe.wc <- cal.out.long %>%
+  group_by(abin, water_clarity) %>%
+  pairwise_t_test(per.error ~ type, paired = TRUE, 
+                  p.adjust.method = "bonferroni")
+pair.mpe.wc
+
+# Updated by Abuns relative to zero
+pair.mpe.wc.0u <- cal.out.long %>%
+  filter(type == "updated") %>% 
+  group_by(abin, water_clarity) %>%
+  t_test(per.error ~ 1, mu = 0)
+pair.mpe.wc.0u
+
+# Default by Abuns relative to zero
+pair.mpe.wc.0d <- cal.out.long %>%
+  filter(type == "historical") %>% 
+  group_by(abin, water_clarity) %>%
+  t_test(per.error ~ 1, mu = 0)
+pair.mpe.wc.0d
+
+lm.mpe.wc.dat <- expand.grid(abin = unique(cal.out.long$abin),
+                       type = unique(cal.out.long$type),
+                       water_clarity = unique(cal.out.long$water_clarity)) %>% 
+  mutate(abin = as.character(abin),
+         type = as.character(type),
+         water_clarity = as.character(water_clarity))
+
+lm.mpe.wc.dat <- cbind(lm.mpe.wc.dat, 
+                 as.data.frame(
+                   predict(cal.lm.mpe.wc, newdata = lm.mpe.wc.dat, 
+                           type = "response", se.fit = TRUE)
+                   )
+                 )
+```
+
+#### Absolute Percent Error
+```{r}
+cal.lm.mape.wc <- lm(abs.per.error ~ type*abin*water_clarity, data = cal.out.long)
+summary(cal.lm.mape.wc)
+
+plot(fitted(cal.lm.mape.wc), residuals(cal.lm.mape.wc))
+abline(h = 0)
+
+# plot(cal.lm.mape.wc)
+
+aov.mape.wc <- aov(abs.per.error ~ type*abin*water_clarity, data = cal.out.long)
+summary(aov.mape.wc)
+TukeyHSD(aov.mape.wc, which = c("type", "abin", "water_clarity"))
+
+# outliers?
+cal.out.long %>%
+     group_by(abin, water_clarity, type) %>%
+     identify_outliers(abs.per.error) %>% 
+  filter(type == "updated")
+
+# Homogeneity of variance test from https://www.datanovia.com/en/lessons/mixed-anova-in-r/#post-hoc-tests
+cal.out.long %>%
+  group_by(abin, water_clarity) %>%
+  levene_test(abs.per.error ~ type)
+
+pair.mape.wc <- cal.out.long %>%
+  group_by(abin, water_clarity) %>%
+  pairwise_t_test(abs.per.error ~ type, paired = TRUE, 
+                  p.adjust.method = "bonferroni")
+pair.mape.wc
+
+# Updated by Abuns relative to zero
+pair.mape.wc.0u <- cal.out.long %>%
+  filter(type == "updated") %>% 
+  group_by(abin, water_clarity) %>%
+  t_test(abs.per.error ~ 1, mu = 0, alternative = "greater")
+pair.mape.wc.0u
+
+# Default by Abuns relative to zero
+pair.mape.wc.0d <- cal.out.long %>%
+  filter(type == "historical") %>% 
+  group_by(abin, water_clarity) %>%
+  t_test(abs.per.error ~ 1, mu = 0, alternative = "greater")
+pair.mape.wc.0d
+
+lm.mape.wc.dat <- expand.grid(abin = unique(cal.out.long$abin),
+                       type = unique(cal.out.long$type),
+                       water_clarity = unique(cal.out.long$water_clarity)) %>% 
+  mutate(abin = as.character(abin),
+         type = as.character(type),
+         water_clarity = as.character(water_clarity))
+
+lm.mape.wc.dat <- cbind(lm.mape.wc.dat, 
+                 as.data.frame(
+                   predict(cal.lm.mape.wc, newdata = lm.mape.wc.dat, 
+                           type = "response", se.fit = TRUE)
+                   )
+                 )
+```
+
+#### Summary Table
+```{r}
+cal.out.mpe.mape.summary <- cal.out.summary.combined %>% 
+  mutate(type = ifelse(type == "historical", "MPE", "MAPE")) %>% 
+  dplyr::select(abin:n) %>% 
+  rename(metric = type) %>% 
+  mutate(updated.to.default = NA,
+         updated.to.zero = NA,
+         default.to.zero = NA)
+
+### Relative to Historical ###
+# MPE All Combined Relative to Historical
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.default[abin == "All" & metric == "MPE" & 
+                             water_clarity == "Combined"] <- t.mpe$p})
+# MPE Abins Relative to Historical
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.default[abin != "All" & metric == "MPE" & 
+                             water_clarity == "Combined"] <- pair.mpe$p})
+# MAPE All Combined Relative to Historical
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.default[abin == "All" & metric == "MAPE" & 
+                             water_clarity == "Combined"] <- t.mape$p})
+# MAPE Abins Relative to Historical
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.default[abin != "All" & metric == "MAPE" & 
+                             water_clarity == "Combined"] <- pair.mape$p})
+# MPE Abins & Water Clarity Relative to Historical
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.default[abin != "All" & metric == "MPE" & 
+                             water_clarity != "Combined"] <- pair.mpe.wc$p})
+# MAPE Abins & Water Clarity Relative to Historical
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.default[abin != "All" & metric == "MAPE" & 
+                             water_clarity != "Combined"] <- pair.mape.wc$p})
+
+### Updated Relative to Zero ###
+# MPE All Combined
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.zero[abin == "All" & metric == "MPE" & 
+                             water_clarity == "Combined"] <- t.mpe.0u$p})
+# MPE Abins 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.zero[abin != "All" & metric == "MPE" & 
+                             water_clarity == "Combined"] <- pair.mpe.0u$p})
+# MAPE All Combined 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.zero[abin == "All" & metric == "MAPE" & 
+                             water_clarity == "Combined"] <- t.mape.0u$p})
+# MAPE Abins 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.zero[abin != "All" & metric == "MAPE" & 
+                             water_clarity == "Combined"] <- pair.mape.0u$p})
+# MPE Abins & Water Clarity 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.zero[abin != "All" & metric == "MPE" & 
+                             water_clarity != "Combined"] <- pair.mpe.wc.0u$p})
+# MAPE Abins & Water Clarity 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     updated.to.zero[abin != "All" & metric == "MAPE" & 
+                             water_clarity != "Combined"] <- pair.mape.wc.0u$p})
+
+### Deafult Relative to Zero ###
+# MPE All Combined
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     default.to.zero[abin == "All" & metric == "MPE" & 
+                             water_clarity == "Combined"] <- t.mpe.0d$p})
+# MPE Abins 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     default.to.zero[abin != "All" & metric == "MPE" & 
+                             water_clarity == "Combined"] <- pair.mpe.0d$p})
+# MAPE All Combined 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     default.to.zero[abin == "All" & metric == "MAPE" & 
+                             water_clarity == "Combined"] <- t.mape.0d$p})
+# MAPE Abins 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     default.to.zero[abin != "All" & metric == "MAPE" & 
+                             water_clarity == "Combined"] <- pair.mape.0d$p})
+# MPE Abins & Water Clarity 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     default.to.zero[abin != "All" & metric == "MPE" & 
+                             water_clarity != "Combined"] <- pair.mpe.wc.0d$p})
+# MAPE Abins & Water Clarity 
+cal.out.mpe.mape.summary <- within(cal.out.mpe.mape.summary, {
+     default.to.zero[abin != "All" & metric == "MAPE" & 
+                             water_clarity != "Combined"] <- pair.mape.wc.0d$p})
+
+# Clean
+cal.out.mpe.mape.summary.clean <- cal.out.mpe.mape.summary %>% 
+  mutate_at(c("updated.to.default","updated.to.zero","default.to.zero"), 
+            round2, digits = 4) %>% 
+  mutate(
+    across(c(updated.to.default, updated.to.zero, default.to.zero),
+           ~ if_else(. < 0.0025,
+                     "< 0.0025*",
+                     as.character(.))
+           )
+  )
+
+write.csv(cal.out.mpe.mape.summary.clean, 
+          file = "./tables/03_03-Comparison-with-Historical-Summary-Statistics-Combined.csv",
+          row.names = F)
+```
+
+### Through Time
+```{r}
+hist(cal.out$year, breaks = 3)
+
+cal.out.summary.years <- cal.out.long %>% 
+  mutate(ybin = case_when(
+    year < 2004 ~ "1988-2003",
+    year >= 2004 & year <= 2010 ~ "2004-2010",
+    year > 2010 ~ "2011-2022"
+  )) %>% 
+  group_by(ybin, type) %>% 
+  summarise(n = n(),
+            MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            R.Cor = cor(estimate, hpe, method = "pearson"),
+            Abundance = sum(estimate)) %>% 
+  mutate(MPE = round2(MPE*100, 1),
+         MAPE = round2(MAPE*100, 1),
+         RMSE = round2(RMSE, 0),
+         R.Cor = round2(R.Cor*100, 1),
+         Abundance = round2(Abundance, 0)) ; cal.out.summary.years
+
+write.csv(cal.out.summary.years, 
+          file = "./tables/03_03-Comparison-with-Historical-Summary-Table-Year-Bins.csv",
+          row.names = F)
+
+ggplot(cal.out.long,
+       aes(x = year, y = abs.per.error)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(type~abin)
+
+ggplot(cal.out.long,
+       aes(x = year, y = per.error)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(type~abin)
+```
+#### LM Tests
+Summary Table to Populate
+```{r}
+table.temporal.results <- data.frame(
+  "Metric" = c(rep("MPE", 4), rep("MAPE", 4)),
+  "Calibration.Method" = c(rep(c(rep("Default",2),rep("Updated",2)),2)),
+  "Model" = c(rep(c("Temporal General", 
+                  "Interaction w/Abundance"),4)),
+  "Ratio.p.value" = NA,
+  "R2" = NA,
+  "Slope" = NA,
+  "SE" = NA
+)
+```
+General Temporal Trend
+```{r}
+# MPE of Default
+lm.t.mpe.D <- lm(per.error ~ year, 
+               data = cal.out.long[cal.out.long$type == "historical", ])
+summary(lm.t.mpe.D)
+# MPE of Updated
+lm.t.mpe.U <- lm(per.error ~ year, 
+               data = cal.out.long[cal.out.long$type == "updated", ])
+summary(lm.t.mpe.U)
+# Save R2, Slopes, and Errors
+table.temporal.results$R2[table.temporal.results$Metric == "MPE" & 
+                            table.temporal.results$Model == "Temporal General"] = c(summary(lm.t.mpe.D)$adj.r.squared,
+                                                                                    summary(lm.t.mpe.U)$adj.r.squared)
+table.temporal.results$Slope[table.temporal.results$Metric == "MPE" & 
+                            table.temporal.results$Model == "Temporal General"] = c(coef(lm.t.mpe.D)[[2]],
+                                                                                    coef(lm.t.mpe.U)[[2]])
+table.temporal.results$SE[table.temporal.results$Metric == "MPE" & 
+                            table.temporal.results$Model == "Temporal General"] = c(summary(lm.t.mpe.D)$coefficients[2,2],
+                                                                                    summary(lm.t.mpe.U)$coefficients[2,2])
+# MAPE of Default
+lm.t.mape.D <- lm(abs.per.error ~ year, 
+               data = cal.out.long[cal.out.long$type == "historical", ])
+summary(lm.t.mape.D)
+# MAPE of Updated
+lm.t.mape.U <- lm(abs.per.error ~ year, 
+               data = cal.out.long[cal.out.long$type == "updated", ])
+summary(lm.t.mape.U)
+
+table.temporal.results$R2[table.temporal.results$Metric == "MAPE" & 
+                            table.temporal.results$Model == "Temporal General"] = c(summary(lm.t.mape.D)$adj.r.squared,
+                                                                                    summary(lm.t.mape.U)$adj.r.squared)
+table.temporal.results$Slope[table.temporal.results$Metric == "MAPE" & 
+                            table.temporal.results$Model == "Temporal General"] = c(coef(lm.t.mape.D)[[2]],
+                                                                                    coef(lm.t.mape.U)[[2]])
+table.temporal.results$SE[table.temporal.results$Metric == "MAPE" & 
+                            table.temporal.results$Model == "Temporal General"] = c(summary(lm.t.mape.D)$coefficients[2,2],
+                                                                                    summary(lm.t.mape.U)$coefficients[2,2])
+
+table.temporal.results <- table.temporal.results %>% 
+  mutate_at(c("R2","Slope","SE"), round2, digits = 3)
+```
+With Size Bin covariates
+```{r}
+# MPE of Default
+lm.ta.mpe.D <- lm(per.error ~ year*abin, 
+               data = cal.out.long[cal.out.long$type == "historical", ])
+lm.ta.mpe.D.sum <- summary(lm.ta.mpe.D); lm.ta.mpe.D.sum
+# Slopes & SEs for each Abundance Bin
+slope.ta.mpe.D.b1 <- coef(lm.ta.mpe.D.sum)["year", "Estimate"]
+se.ta.mpe.D.b1    <- coef(lm.ta.mpe.D.sum)["year", "Std. Error"]
+# For b2:
+slope.ta.mpe.D.b2 <- slope.ta.mpe.D.b1 + coef(lm.ta.mpe.D.sum)["year:abin25-75k", "Estimate"]
+se.ta.mpe.D.b2    <- sqrt(se.ta.mpe.D.b1^2 + 
+                            coef(lm.ta.mpe.D.sum)["year:abin25-75k", "Std. Error"]^2)
+# For b3:
+slope.ta.mpe.D.b3 <- slope.ta.mpe.D.b1 + coef(lm.ta.mpe.D.sum)["year:abin75k+", "Estimate"]
+se.ta.mpe.D.b3    <- sqrt(se.ta.mpe.D.b1^2 + 
+                   coef(lm.ta.mpe.D.sum)["year:abin75k+", "Std. Error"]^2)
+# MPE of Updated
+lm.ta.mpe.U <- lm(per.error ~ year*abin, 
+               data = cal.out.long[cal.out.long$type == "updated", ])
+lm.ta.mpe.U.sum <- summary(lm.ta.mpe.U); lm.ta.mpe.U.sum
+# Slopes & SEs for each Abundance Bin
+slope.ta.mpe.U.b1 <- coef(lm.ta.mpe.U.sum)["year", "Estimate"]
+se.ta.mpe.U.b1    <- coef(lm.ta.mpe.U.sum)["year", "Std. Error"]
+# For b2:
+slope.ta.mpe.U.b2 <- slope.ta.mpe.U.b1 + coef(lm.ta.mpe.U.sum)["year:abin25-75k", "Estimate"]
+se.ta.mpe.U.b2    <- sqrt(se.ta.mpe.U.b1^2 + 
+                            coef(lm.ta.mpe.U.sum)["year:abin25-75k", "Std. Error"]^2)
+# For b3:
+slope.ta.mpe.U.b3 <- slope.ta.mpe.U.b1 + coef(lm.ta.mpe.U.sum)["year:abin75k+", "Estimate"]
+se.ta.mpe.U.b3    <- sqrt(se.ta.mpe.U.b1^2 + 
+                   coef(lm.ta.mpe.U.sum)["year:abin75k+", "Std. Error"]^2)
+
+# Save R2, Slopes, and Errors
+table.temporal.results$R2[table.temporal.results$Metric == "MPE" & 
+                            table.temporal.results$Model == "Interaction w/Abundance"] = round2(c(summary(lm.ta.mpe.D)$adj.r.squared,
+                                                                                    summary(lm.ta.mpe.U)$adj.r.squared), 3)
+
+table.temporal.results$Slope[table.temporal.results$Metric == "MPE" & 
+                            table.temporal.results$Model == "Interaction w/Abundance"] = c(paste(round2(c(slope.ta.mpe.D.b1,
+                                                                                                          slope.ta.mpe.D.b2,
+                                                                                                          slope.ta.mpe.D.b3), 3), collapse = "; "),
+                                                                                           paste(round2(c(slope.ta.mpe.U.b1,
+                                                                                                          slope.ta.mpe.U.b2,
+                                                                                                          slope.ta.mpe.U.b3), 3), collapse = "; "))
+table.temporal.results$SE[table.temporal.results$Metric == "MPE" & 
+                            table.temporal.results$Model == "Interaction w/Abundance"] = c(paste(round2(c(se.ta.mpe.D.b1,
+                                                                                                          se.ta.mpe.D.b2,
+                                                                                                          se.ta.mpe.D.b3), 3), collapse = "; "),
+                                                                                           paste(round2(c(se.ta.mpe.U.b1,
+                                                                                                          se.ta.mpe.U.b2,
+                                                                                                          se.ta.mpe.U.b3), 3), collapse = "; "))
+
+
+# MAPE of Default
+lm.ta.mape.D <- lm(abs.per.error ~ year*abin, 
+               data = cal.out.long[cal.out.long$type == "historical", ])
+lm.ta.mape.D.sum <- summary(lm.ta.mape.D); lm.ta.mape.D.sum
+# Slopes & SEs for each Abundance Bin
+slope.ta.mape.D.b1 <- coef(lm.ta.mape.D.sum)["year", "Estimate"]
+se.ta.mape.D.b1    <- coef(lm.ta.mape.D.sum)["year", "Std. Error"]
+# For b2:
+slope.ta.mape.D.b2 <- slope.ta.mape.D.b1 + coef(lm.ta.mape.D.sum)["year:abin25-75k", "Estimate"]
+se.ta.mape.D.b2    <- sqrt(se.ta.mape.D.b1^2 + 
+                            coef(lm.ta.mape.D.sum)["year:abin25-75k", "Std. Error"]^2)
+# For b3:
+slope.ta.mape.D.b3 <- slope.ta.mape.D.b1 + coef(lm.ta.mape.D.sum)["year:abin75k+", "Estimate"]
+se.ta.mape.D.b3    <- sqrt(se.ta.mape.D.b1^2 + 
+                   coef(lm.ta.mape.D.sum)["year:abin75k+", "Std. Error"]^2)
+# MAPE of Updated
+lm.ta.mape.U <- lm(abs.per.error ~ year*abin, 
+               data = cal.out.long[cal.out.long$type == "updated", ])
+lm.ta.mape.U.sum <- summary(lm.ta.mape.U); lm.ta.mape.U.sum
+# Slopes & SEs for each Abundance Bin
+slope.ta.mape.U.b1 <- coef(lm.ta.mape.U.sum)["year", "Estimate"]
+se.ta.mape.U.b1    <- coef(lm.ta.mape.U.sum)["year", "Std. Error"]
+# For b2:
+slope.ta.mape.U.b2 <- slope.ta.mape.U.b1 + coef(lm.ta.mape.U.sum)["year:abin25-75k", "Estimate"]
+se.ta.mape.U.b2    <- sqrt(se.ta.mape.U.b1^2 + 
+                            coef(lm.ta.mape.U.sum)["year:abin25-75k", "Std. Error"]^2)
+# For b3:
+slope.ta.mape.U.b3 <- slope.ta.mape.U.b1 + coef(lm.ta.mape.U.sum)["year:abin75k+", "Estimate"]
+se.ta.mape.U.b3    <- sqrt(se.ta.mape.U.b1^2 + 
+                   coef(lm.ta.mape.U.sum)["year:abin75k+", "Std. Error"]^2)
+
+# Save R2, Slopes, and Errors
+table.temporal.results$R2[table.temporal.results$Metric == "MAPE" & 
+                            table.temporal.results$Model == "Interaction w/Abundance"] = round2(c(summary(lm.ta.mape.D)$adj.r.squared,
+                                                                                    summary(lm.ta.mape.U)$adj.r.squared), 3)
+
+table.temporal.results$Slope[table.temporal.results$Metric == "MAPE" & 
+                            table.temporal.results$Model == "Interaction w/Abundance"] = c(paste(round2(c(slope.ta.mape.D.b1,
+                                                                                                          slope.ta.mape.D.b2,
+                                                                                                          slope.ta.mape.D.b3), 3), collapse = "; "),
+                                                                                           paste(round2(c(slope.ta.mape.U.b1,
+                                                                                                          slope.ta.mape.U.b2,
+                                                                                                          slope.ta.mape.U.b3), 3), collapse = "; "))
+table.temporal.results$SE[table.temporal.results$Metric == "MAPE" & 
+                            table.temporal.results$Model == "Interaction w/Abundance"] = c(paste(round2(c(se.ta.mape.D.b1,
+                                                                                                          se.ta.mape.D.b2,
+                                                                                                          se.ta.mape.D.b3), 3), collapse = "; "),
+                                                                                           paste(round2(c(se.ta.mape.U.b1,
+                                                                                                          se.ta.mape.U.b2,
+                                                                                                          se.ta.mape.U.b3), 3), collapse = "; "))
+```
+Intercept/Null Models
+```{r}
+# MPE of Default
+lm.mpe.D <- lm(per.error ~ 1, 
+               data = cal.out.long[cal.out.long$type == "historical", ])
+summary(lm.mpe.D)
+# MPE of Updated
+lm.mpe.U <- lm(per.error ~ 1, 
+               data = cal.out.long[cal.out.long$type == "updated", ])
+summary(lm.mpe.U)
+
+
+# MAPE of Default
+lm.mape.D <- lm(abs.per.error ~ 1, 
+               data = cal.out.long[cal.out.long$type == "historical", ])
+summary(lm.mape.D)
+# MAPE of Updated
+lm.mape.U <- lm(abs.per.error ~ 1, 
+               data = cal.out.long[cal.out.long$type == "updated", ])
+summary(lm.mape.U)
+```
+
+#### LRT
+P < 0.05 means that the more complicated model significantly adds explanatory power
+```{r}
+# MPE
+# Default 1.8 Series tests
+# Is the interaction with abundance bins significant
+lrt.ta.mpe.D <- lrtest(lm.t.mpe.D, lm.ta.mpe.D)
+lrt.ta.mpe.D # significant
+# Is a temporal covariate significant
+lrt.t.mpe.D <- lrtest(lm.mpe.D, lm.t.mpe.D)
+lrt.t.mpe.D # significant
+# Updated Series Tests
+# Is the interaction with abundance bins significant
+lrt.ta.mpe.U <- lrtest(lm.t.mpe.U, lm.ta.mpe.U)
+lrt.ta.mpe.U # NOT significant
+# Is a temporal covariate signifiant
+lrt.t.mpe.U <- lrtest(lm.mpe.U, lm.t.mpe.U)
+lrt.t.mpe.U # NOT significant
+# Interpretation - There is not significant temporal trend in the Updated Series
+
+# save Ratio P Values
+table.temporal.results$Ratio.p.value[table.temporal.results$Metric == "MPE"] = 
+  round2(c(lrt.t.mpe.D$`Pr(>Chisq)`[2], lrt.ta.mpe.D$`Pr(>Chisq)`[2], 
+         lrt.t.mpe.U$`Pr(>Chisq)`[2], lrt.ta.mpe.U$`Pr(>Chisq)`[2]), 3)
+
+# MAPE
+# Default 1.8 Series tests
+# Is the interaction with abundance bins significant
+lrt.ta.mape.D <- lrtest(lm.t.mape.D, lm.ta.mape.D)
+lrt.ta.mape.D # NOT significant
+# Is a temporal covariate significant
+lrt.t.mape.D <- lrtest(lm.mape.D, lm.t.mape.D)
+lrt.t.mape.D # significant
+# Updated Series Tests
+# Is the interaction with abundance bins significant
+lrt.ta.mape.U <- lrtest(lm.t.mape.U, lm.ta.mape.U)
+lrt.ta.mape.U # NOT significant
+# Is a temporal covariate significant
+lrt.t.mape.U <- lrtest(lm.mape.U, lm.t.mape.U)
+lrt.t.mape.U # significant
+
+# Save P values
+table.temporal.results$Ratio.p.value[table.temporal.results$Metric == "MAPE"] = 
+  round2(c(lrt.t.mape.D$`Pr(>Chisq)`[2], lrt.ta.mape.D$`Pr(>Chisq)`[2], 
+         lrt.t.mape.U$`Pr(>Chisq)`[2], lrt.ta.mape.U$`Pr(>Chisq)`[2]), 3)
+
+table.temporal.results <- table.temporal.results %>% 
+  mutate(Ratio.p.value = ifelse(Ratio.p.value == 0, "< 0.001",
+                                Ratio.p.value))
+
+# Interpretation - There is no significant temporal trend within abundance bins
+# But there is a temporal trend on Average for MAPE in both the Default and Updated.
+# 
+# Save Table of Results
+write.csv(table.temporal.results, file = "./tables/03_03-Temporal-Trend-Regressions-LRT.csv",
+          row.names = F)
+
+```
+
+# Plots
+## By Model
+```{r}
+ggplot(cal.out.long,
+       aes(x = hpe, y = per.error,
+           colour = type)) +
+  geom_point() +
+  scale_colour_manual(name = "Estimate Type",
+                    values = c("salmon", "grey"),
+                    labels = c("Default", "Updated")) +
+  geom_hline(yintercept = 0) +
+  facet_wrap(calibration.model~abin, scales = "free_x")
+
+ggplot(cal.out.long,
+       aes(x = abin, y = per.error,
+           fill = type)) +
+  geom_boxplot() +
+  scale_fill_manual(name = "Estimate Type",
+                    values = c("salmon", "grey"),
+                    labels = c("Default", "Updated")) +
+  geom_hline(yintercept = 0) +
+  facet_wrap(~calibration.model, scales = "free_x") +
+  labs(x = "High Accuracy Abundance Bins", y = "Percent Error")
+
+ggsave("./figures/03_Model_Performance/Percent_Error_By_Model_By_Abundance_Bins.png",
+       height = 7, width = 7, dpi = 95)
+```
+
+## Early Stuart
+```{r}
+estu <- cal.out.long %>% 
+  filter(run_timing_group == "Early Stuart")
+
+cal.estu <- cal %>% filter(run_timing_group == "Early Stuart")
+
+cal %>% filter(size == "Medium") %>% count(lpe_method, water_clarity)
+
+count(estu, type, gazetted_stream_name)
+
+count(estu, type, size, lpe_method, water_clarity)
+count(estu, type, water_clarity, calibration.model)
+
+estu %>% 
+  filter(type == "historical") %>% 
+  ggplot(aes(x = size, y = hpe/lpe, fill = size, colour = water_clarity)) +
+  geom_hline(yintercept = 1.8, col = "red", alpha = 0.5) +
+  geom_boxplot() +
+  scale_fill_manual(values = "#D55E00") +
+  scale_colour_manual(values = c("gray","black")) +
+  facet_wrap(~lpe_method) +
+  labs(y = "High Accuracy / Peak Count")
+
+ggsave("./figures/03_Model_Performance/Early_Stuart_Story.png",
+       height = 4, width = 5, dpi = 95)
+
+estu.summary <- estu %>% 
+  group_by(abin, type, water_clarity) %>% 
+  summarise(MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            R.Cor = cor(estimate, hpe, method = "pearson"),
+            sample = n()) ;estu.summary
+
+estu %>% 
+  group_by(type) %>% 
+  summarise(MPE = mean(per.error),
+            #Abs.MPE = abs(MPE),
+            MAPE = mean(abs.per.error),
+            RMSE = sqrt(mean(squared.error)),
+            R.Cor = cor(estimate, hpe, method = "pearson"),
+            sample = n(),
+            ratio = mean(hpe/lpe),
+            ratio.m = median(hpe/lpe))
+```
+
+## Summary Figures
+### MPE and MAPE
+```{r}
+# combining model results by adding a field for water clarity to the combined one
+lm.mpe.dat$water_clarity <- "Combined"
+lm.mpe.dat.combined <- rbind(lm.mpe.wc.dat, lm.mpe.dat)
+# combining model results by adding a field for water clarity to the combined one
+lm.mape.dat$water_clarity <- "Combined"
+lm.mape.dat.combined <- rbind(lm.mape.wc.dat, lm.mape.dat)
+
+p.dodge <- 0.6
+err.bar.wd <- 0.4
+
+p.MPE.combined <- ggplot(lm.mpe.dat.combined,
+       aes(x = abin, y = fit, shape = water_clarity, colour = type)) +
+  geom_hline(yintercept = 0, colour = "grey15", alpha = 0.5) +
+  geom_point(position = position_dodge(width = p.dodge), size = 1.75) +
+  geom_errorbar(aes(ymin = fit-se.fit, ymax = fit+se.fit), 
+                position = position_dodge(width = p.dodge), width = err.bar.wd) +
+  scale_colour_manual(name = "Estimate Type",
+                    values = c("salmon", "grey"),
+                    labels = c("Default", "Updated")) +
+  scale_shape_manual(name = "Water Clarity",
+                     values = c(15, 16, 17),
+                    labels = c("Clear", "Combined", "Turbid/Tannic")) +
+  labs(x = "High Accuracy Abundance Estimate Bins", y = "Fit of MPE") +
+  ylim(c(-0.52, 0.5))
+
+p.MAPE.combined <- ggplot(lm.mape.dat.combined,
+       aes(x = abin, y = fit, shape = water_clarity, colour = type)) +
+  geom_point(position = position_dodge(width = p.dodge), size = 1.75) +
+  geom_errorbar(aes(ymin = fit-se.fit, ymax = fit+se.fit), 
+                position = position_dodge(width = p.dodge), width = err.bar.wd) +
+  scale_colour_manual(name = "Estimate Type",
+                    values = c("salmon", "grey"),
+                    labels = c("Default", "Updated")) +
+  scale_shape_manual(name = "Water Clarity",
+                     values = c(15, 16, 17),
+                    labels = c("Clear", "Combined", "Turbid/Tannic")) +
+  labs(x = "High Accuracy Abundance Estimate Bins", y = "Fit of MAPE") +
+  ylim(c(0,0.5))
+
+p.MPE.combined + p.MAPE.combined +
+    plot_annotation(tag_levels = 'A') +
+  plot_layout(ncol = 2, guides = "collect",
+              axes = "collect") &
+  theme(legend.position='right', plot.tag = element_text(size = 10),
+        legend.title = element_text(face = "bold"))
+
+ggsave("./figures/03_Model_Performance/F1_Fitted_Performance_Metrics_By_Abun_and_WC.png",
+       height = 4, width = 9, dpi = 95)
+```
+
+
+### Performance relative to 1.8
+```{r}
+options(scipen=10000)
+# natural Calibrated vs High Accuracy
+f1a <- ggplot(cal.out,
+       aes(x = hpe,
+           y = calibrated.estimate)) +
+  geom_vline(xintercept = 75000, alpha = 0.25, lty = 2) +
+  geom_vline(xintercept = 25000, alpha = 0.25, lty = 2) +
+  geom_point(aes(y = classic), alpha = 0.25, colour = "salmon") +
+  geom_abline(slope = 1, intercept = 0, colour = "gray") +
+  geom_point(alpha = 0.5) +
+  geom_errorbar(aes(ymin = calibrated.se.lower, ymax = calibrated.se.upper),
+                alpha = 0.25) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "High Accuracy Estimates",
+       y = "Caibrated Estimates \n and Standard Errors")
+
+# logarithmic Calibrated vs High Accuracy
+f1b <- ggplot(cal.out,
+       aes(x = log(hpe),
+           y = log(calibrated.estimate))) +
+  geom_vline(xintercept = log(75000), alpha = 0.25, lty = 2) +
+  geom_vline(xintercept = log(25000), alpha = 0.25, lty = 2) +
+  geom_point(aes(y = log(classic)), alpha = 0.25, colour = "salmon") +
+  geom_abline(slope = 1, intercept = 0, colour = "gray") +
+  geom_point(alpha = 0.5) +
+  geom_errorbar(aes(ymin = log(calibrated.se.lower), ymax = log(calibrated.se.upper)),
+                alpha = 0.25) +
+  labs(x = "Natural Log of High Accuracy Estimates",
+       y = "Natural Log of Caibrated Estimates \n and Standard Errors")
+
+# Classic Expansion Residuals
+f1c <- ggplot(cal.out,
+              aes(x = log(hpe),
+                  y = classic.per.error)) +
+  geom_vline(xintercept = log(75000), alpha = 0.25, lty = 2) +
+  geom_vline(xintercept = log(25000), alpha = 0.25, lty = 2) +
+  geom_hline(yintercept = 0, colour = "gray") +
+  geom_hline(yintercept = c(0.25, -0.25), alpha = 0.25, col = "grey") +
+  geom_hline(yintercept = c(0.5, -0.5), alpha = 0.25, col = "blue") +
+  geom_point(alpha = 0.5, col = "salmon") +
+  ylim(c(-2.5,2.5)) +
+  labs(x = "Natural Log of High Accuracy Estimates",
+       y = "Percent Error of Classic Expansion")
+
+# New Calibration Residuals
+f1d <- ggplot(cal.out,
+              aes(x = log(hpe),
+                  y = per.error)) +
+  geom_vline(xintercept = log(75000), alpha = 0.25, lty = 2) +
+  geom_vline(xintercept = log(25000), alpha = 0.25, lty = 2) +
+  geom_hline(yintercept = 0, colour = "gray") +
+  geom_hline(yintercept = c(0.25, -0.25), alpha = 0.25, col = "grey") +
+  geom_hline(yintercept = c(0.5, -0.5), alpha = 0.25, col = "blue") +
+  geom_point(alpha = 0.5) +
+  ylim(c(-2.5,2.5)) +
+  labs(x = "Natural Log of High Accuracy Estimates",
+       y = "Percent Error of New Expansion")
+
+(f1a + f1b) / (f1c + f1d) + plot_annotation(tag_levels = 'A') +
+  theme(plot.tag = element_text(size = 6))
+
+ggsave("./figures/03_Model_Performance/F2_CalibratedvHPE_Calibration_Set_Results.png",
+       height = 8, width = 10, dpi = 150)
+```

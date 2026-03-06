@@ -1,0 +1,802 @@
+---
+title: "02-01-Model-Ranks"
+author: "Michael Arbeider"
+date: "2026-03-06"
+---
+
+This Code is used to pre-screen the General Model Suite.
+
+# Set-up
+## Packages
+```{r}
+rm(list = ls())
+library(tidyverse) # most %>% 
+theme_set(theme_bw()) # ggplot
+library(patchwork) # for multi plot ggplot graphs
+library(scales) # for label_comma()
+```
+
+## Functions
+```{r}
+source("00-Functions.R") # scale_x_reordered, rank.summary(), round2()
+```
+
+
+## Data
+Reading in calibration data and then reading in all of the Model Rank outputs
+```{r}
+cal <-readRDS("r_objects/sockeye_calibration_data.rds")   
+
+glimpse(cal)
+
+# Combining all model rank outputs from other rmd files
+ # Data path folder for Model Ranks
+r_objects <- "./r_objects"
+ # Pull all the data files
+data_path <- dir(r_objects, full.names = TRUE)
+  # Obtain the file names that inlcude Model Ranks
+fileNames <- data_path[grep(pattern = "Model_Ranks", data_path)]
+# remove the one time test of Harrison Individual MoR
+fileNames <- fileNames[fileNames != "./r_objects/01_Model_Ranks_from_MoR_Harrison_Model.rds"]
+
+ # Create a character string with the Model Type / Data Source
+source <- sub(pattern = ".*from_", "", fileNames)
+source <- sub(pattern = ".rds", "", source)
+
+# looping through file names to read in RDS and create a "source" field based on the file name
+for(i in 1:length(fileNames)){
+  if(i==1) mod.ranks <- readRDS(fileNames[i])
+  if(i==1) mod.ranks$source = source[1]
+  if(i!=1) mod.ranks.temp <- readRDS(fileNames[i])
+  if(i!=1) mod.ranks.temp$source = source[i]
+  if(i!=1) mod.ranks = rbind(mod.ranks, mod.ranks.temp)
+}
+# removing the temporary binding dataframe that is a part of mod.ranks
+rm(mod.ranks.temp) 
+
+# joining the "classic" 1.8 expansion to every estimate
+# this will be used to create a Scaled Error relative to the current 1.8 expansion
+classic <- mod.ranks %>% 
+  filter(source == "All_Data_Classic_Expansion") %>% 
+  dplyr::select(usid, fit) %>% 
+  rename(classic = fit) # calling the 1.8 fit "classic"
+
+# joining the classic 1.8 and calculating the absolute difference between the 1.8 expansion and the High Accuracy estimate
+mod.ranks <- mod.ranks %>% 
+  left_join(., classic) %>% 
+  mutate(abs.classic.error = abs(hpe - classic))
+
+# removing "All_Data_Classic_Expansion" from the mod.ranks as we won't be selecting it
+mod.ranks <- filter(mod.ranks, source != "All_Data_Classic_Expansion")
+
+# joining other system specific information and creating Rank-Set levels
+mod.ranks <- mod.ranks %>% 
+  left_join(., dplyr::select(cal, usid, size, water_clarity)) %>% 
+  # making some Rank.Set columns for filtering later
+  mutate(agg.size = case_when(
+    size %in% c("Small", "Medium") ~ "SM",
+    size %in% c("Large", "X-Large") ~ "LXL"
+    ),
+    size.clarity = paste0(size, "_", water_clarity))
+
+# making the same rank set columns in the cal data frame
+cal <- cal %>% 
+  mutate(agg.size = case_when(
+    size %in% c("Small", "Medium") ~ "SM",
+    size %in% c("Large", "X-Large") ~ "LXL"
+    ),
+    agg.size.clarity = paste0(agg.size, "_", water_clarity),
+    size.clarity = paste0(size, "_", water_clarity))
+
+# Save mod.ranks once
+saveRDS(mod.ranks, file = "./r_objects/02_01_combined_model_LOO_rank_data.rds")
+```
+
+Remove the Low Abundance Models, these will be assessed in 02-02.
+```{r}
+mod.ranks <- mod.ranks %>% 
+  filter(model != "MoR_Low_Abundance_Models")
+```
+
+
+Model Sample Size Table
+```{r}
+mod.rank.sum.by.model <- mod.ranks %>% 
+  ungroup() %>% 
+  count(source, model, lpe_method)
+
+mod.ranks %>% 
+  ungroup() %>% 
+  count(source, model, lpe_method, size, water_clarity)
+
+#write.csv(mod.rank.sum.by.model, file = "./tables/04_02_Model_Ranks_by_Model_Simple.csv",
+#          row.names = F)
+
+count(cal, lpe_method, size)
+```
+
+# Model Ranking by Rank Sets
+```{r}
+sample.minimum <- 6
+```
+
+## 01 Whole Dataset
+by method
+```{r}
+for(j in c("Ground", "Aerial")){ # loop for each method
+# create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+  filter(rank.set.level <= 1) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     source %in% tempfilter2$source,
+                                     lpe_method == j))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("01_All_General - All - ", j),
+             rank.filter = "All",
+             rank.method = j,
+             rank.set = "01_All_General",
+             special.level = 1) # identifying that the special level is 1
+    # special.level will be used to later to determine if the top model is from
+    # the specialized level or if it is from a more aggregated level
+    
+    if(j == "Ground") rank.compare.general <- rank.temp
+    if(j != "Ground") rank.compare.general <- rbind(rank.compare.general, rank.temp)
+} # end of method loop j
+```
+
+
+## 02 Agg.Size
+Creating Rank Summary's for various 
+
+System-Method-Sets or sys.meth.set
+
+Steps are to 
+create a list of USIDS that are a part of the sys.meth.set
+and then filter the model results to only include those USIDS
+and then run the rank.summary() function on them.
+Last step is to bind all of the results together
+
+```{r}
+agg.size <- as.character(unique(cal$agg.size))
+
+for(i in agg.size){ # loop for every agg.size
+  for(j in c("Ground", "Aerial")){ # loop for each method
+    
+    # create a USID filter for the agg.size-method Rank Set
+    tempfilter1 <- cal %>% filter(agg.size == i,
+                                 lpe_method == j)
+    
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 2) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("02_AggregateSize_General", " - ", i, " - ", j),
+             rank.filter = i,
+             rank.method = j,
+             rank.set = "02_AggregateSize_General",
+             special.level = 2)
+    
+    if(i == agg.size[1] & j == "Ground") rank.compare.agg.size <- rank.temp
+    rank.compare.agg.size <- rbind(rank.compare.agg.size, rank.temp)
+    
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+  } # end of lpe_method loop
+} # end of size.clarity loop
+
+# removing the duplicates created from the first rbind
+rank.compare.agg.size <- unique(rank.compare.agg.size)
+
+# removing any rankings that have fewer than 10 samples
+rank.compare.agg.size <- rank.compare.agg.size %>% filter(no.estimates >= sample.minimum)
+```
+
+## 03 Size
+```{r}
+size <- as.character(unique(cal$size))
+
+for(i in size){ # loop for every size
+  for(j in c("Ground", "Aerial")){ # loop for each method
+    
+    # create a USID filter for the size-method Rank Set
+    tempfilter1 <- cal %>% filter(size == i,
+                                 lpe_method == j)
+    
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 3) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("03_Size_Specific", " - ", i, " - ", j),
+             rank.filter = i,
+             rank.method = j,
+             rank.set = "03_Size_Specific",
+             special.level = 3)
+    
+    if(i == size[1] & j == "Ground") rank.compare.size <- rank.temp
+    rank.compare.size <- rbind(rank.compare.size, rank.temp)
+    
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+  } # end of lpe_method loop
+} # end of size.clarity loop
+
+# removing the duplicates created from the first rbind
+rank.compare.size <- unique(rank.compare.size)
+
+# removing any rankings that have fewer than 10 samples
+rank.compare.size <- rank.compare.size %>% filter(no.estimates >= sample.minimum)
+```
+
+## 04 Size-Water Clarity
+```{r}
+size.clarity <- as.character(unique(cal$size.clarity))
+
+for(i in size.clarity){ # loop for every size.clarity
+  for(j in c("Ground", "Aerial")){ # loop for each method
+    # create a USID filter for the size.clarity-method Rank Set
+    tempfilter1 <- cal %>% filter(size.clarity == i,
+                                 lpe_method == j)
+    
+    # only run next chunks of code if tempfilter1 is not empty
+    if(nrow(tempfilter1) >= 1){
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 4) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("04_SizeClarity_Specific", " - ", i, " - ", j),
+             rank.filter = i,
+             rank.method = j,
+             rank.set = "04_SizeClarity_Specific",
+             special.level = 4)
+    
+    if(i == size.clarity[1] & j == "Ground") rank.compare.size.clarity <- rank.temp
+    rank.compare.size.clarity <- rbind(rank.compare.size.clarity, rank.temp)
+   
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+   } # end of if statement
+  } # end of lpe_method loop
+} # end of size.clarity loop
+
+# removing the duplicates created from the first rbind
+rank.compare.size.clarity <- unique(rank.compare.size.clarity)
+
+# removing any rankings that have fewer than 10 samples
+rank.compare.size.clarity <- rank.compare.size.clarity %>% filter(no.estimates >= sample.minimum)
+```
+
+## 04.1 Clarity
+```{r}
+clarity <- as.character(unique(cal$water_clarity))
+
+for(i in clarity){ # loop for every clarity
+ 
+    # create a USID filter for the clarity-method Rank Set
+    tempfilter1 <- cal %>% filter(water_clarity == i)
+    
+    # only run next chunks of code if tempfilter1 is not empty
+    if(nrow(tempfilter1) >= 1){
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 4) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("04.1_Clarity_Specific", " - ", i, "- Both"),
+             rank.filter = i,
+             rank.method = "Both",
+             rank.set = "04.1_Clarity_Specific",
+             special.level = 4.1)
+    
+    if(i == clarity[1]) rank.compare.clarity <- rank.temp
+    rank.compare.clarity <- rbind(rank.compare.clarity, rank.temp)
+   
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+   } # end of if statement
+  
+} # end of clarity loop
+
+# removing the duplicates created from the first rbind
+rank.compare.clarity <- unique(rank.compare.clarity)
+
+# removing any rankings that have fewer than 10 samples
+rank.compare.clarity <- rank.compare.clarity %>% filter(no.estimates >= sample.minimum)
+```
+
+
+
+## 04.5 Specialized - General
+This will be filtered out later but I wanted to still test the models as a whole
+Won't be able to apply the results in a generalized sense.
+```{r}
+# pull out the list of rank.set.level = 5 for specialized that are not individual models
+specialized.mods <- unique(mod.ranks$source[mod.ranks$rank.set.level == 6])
+
+for(i in specialized.mods){ # loop for every size.clarity
+  for(j in c("Ground", "Aerial")){ # loop for each method
+    # create a USID filter for the specialized model
+    tempfilter1 <- mod.ranks %>% filter(source == i,
+                                 lpe_method == j)
+    
+    # only run next chunks of code if tempfilter1 is not empty
+    if(nrow(tempfilter1) >= 1){
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 6) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("04.5_Specialized", " - ", i, " - ", j),
+             rank.filter = i,
+             rank.method = j,
+             rank.set = "04.5_Specialized_General",
+             special.level = 4.5)
+    
+    if(i == specialized.mods[1] & j == "Ground") rank.compare.specialized.mods <- rank.temp
+    rank.compare.specialized.mods <- rbind(rank.compare.specialized.mods, rank.temp)
+   
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+   } # end of if statement
+  } # end of lpe_method loop
+} # end of specialized.mods loop
+
+# removing the duplicates created from the first rbind
+rank.compare.specialized.mods <- unique(rank.compare.specialized.mods)
+
+# removing any rankings that have fewer than 10 samples
+rank.compare.specialized.mods <- rank.compare.specialized.mods %>% filter(no.estimates >= sample.minimum)
+```
+
+## 05 Individual - Simple
+```{r}
+# pull out the list of rank.set.level = 5 for specialized that are not individual models
+individual.mods <- unique(mod.ranks$gazetted_stream_name[mod.ranks$rank.set.level == 5])
+
+for(i in individual.mods){ # loop for every size.clarity
+  for(j in c("Ground", "Aerial")){ # loop for each method
+    # create a USID filter for the individual model
+    tempfilter1 <- cal %>% filter(gazetted_stream_name == i,
+                                 lpe_method == j)
+    
+    # only run next chunks of code if tempfilter1 is not empty
+    if(nrow(tempfilter1) >= sample.minimum){
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 5) %>% 
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("05_Individual", " - ", i, " - ", j),
+             rank.filter = i,
+             rank.method = j,
+             rank.set = "05_Individual_Specific",
+             special.level = 5)
+    
+    if(i == individual.mods[1] & j == "Ground") rank.compare.individual.mods <- rank.temp
+    rank.compare.individual.mods <- rbind(rank.compare.individual.mods, rank.temp)
+   
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+   } # end of if statement
+  } # end of lpe_method loop
+} # end of individual.mods loop
+
+# removing the duplicates created from the first rbind
+rank.compare.individual.mods <- unique(rank.compare.individual.mods)
+
+# removing any rankings that have fewer than 10 samples
+rank.compare.individual.mods <- rank.compare.individual.mods %>% filter(no.estimates >= sample.minimum)
+```
+
+## 06 Individual - Specialized
+```{r}
+# pull out the list of rank.set.level = 5 for specialized that are not individual models
+specialized.mods <- unique(mod.ranks$source[mod.ranks$rank.set.level == 6])
+
+for(i in specialized.mods){ # loop for every size.clarity
+  for(j in c("Ground", "Aerial")){ # loop for each method
+    # create a USID filter for the specialized model
+    tempfilter0 <- mod.ranks %>% filter(source == i,
+                                 lpe_method == j)
+    
+    temp.systems <- unique(tempfilter0$gazetted_stream_name) # list of systems to loop through
+    
+    for(k in temp.systems){ # loop for each system within the specialized model
+      
+      tempfilter1 <- mod.ranks %>% filter(source == i,
+                                 lpe_method == j,
+                            gazetted_stream_name == k)
+    
+    # only run next chunks of code if tempfilter1 is not empty
+    if(nrow(tempfilter1) >= 1){
+    # create a SOURCE filter for only models that have the equivalent number of samples
+    tempfilter2 <- mod.ranks %>% 
+      filter(usid %in% tempfilter1$usid,
+             rank.set.level <= 6) %>% # up to 6 to include individual model if available
+      count(source) %>%  
+      filter(n == max(n))
+   
+    # apply the rank.summary() function filtering the mod.ranks by the above filters
+    rank.temp <- rank.summary(filter(mod.ranks,
+                                     usid %in% tempfilter1$usid,
+                                     source %in% tempfilter2$source))
+    
+    # Create a sys.meth.set or RANK.SET Name
+    rank.temp <- rank.temp %>% 
+      mutate(sys.meth.set = paste0("06_", i, " - ", k, " - ", j),
+             rank.filter = k,
+             rank.method = j,
+             rank.set = "06_Specialized_System",
+             special.level = 6)
+    
+    if(i == specialized.mods[1] & j == "Ground" & k == "O' Ne-Ell Creek") rank.compare.specsys.mods <- rank.temp
+    rank.compare.specsys.mods <- rbind(rank.compare.specsys.mods, rank.temp)
+   
+    rm(rank.temp)
+    rm(tempfilter1)
+    rm(tempfilter2)
+      } # end of if statement
+    } # end of temp.systems loop
+  } # end of lpe_method loop
+} # end of specialized.mods loop
+
+# removing the duplicates created from the first rbind
+rank.compare.specsys.mods <- unique(rank.compare.specsys.mods)
+
+# removing any rankings that have fewer than minimum sample requirement
+rank.compare.specsys.mods <- rank.compare.specsys.mods %>% filter(no.estimates >= sample.minimum)
+```
+
+# Rank Summary
+Combining the rank sets
+```{r}
+# Generate the list of data frame names
+rank.combined <- mget(ls(pattern = "^rank.compare\\."))
+
+# Combine the data frames using rbind
+rank.combined <- do.call(rbind, rank.combined)
+
+rank.combined <- rank.combined %>% filter(special.level != 4.1)
+
+saveRDS(rank.combined, file = "./r_objects/02_01_rank_combined_results.rds")
+write.csv(rank.combined, file = "./tables/02_01-rank_combined_results.csv", row.names = F)
+```
+
+## Performance Metric Sensitivity
+I wanted to test what set of performance Metrics may be "best" to use.
+In this case, I plan to identify which metrics often result in the same model
+selection or if there is a set of metrics that results in a different choice 
+more often.
+```{r}
+# selecting just the identifier information sys.meth.set:rank.set, source
+# and selecting the different metric-set results, the rel.sums
+rank.method.compare <- rank.combined %>% 
+  dplyr::select(sys.meth.set:rank.set, source, rel.sum:rel.sum.5) %>% 
+  # pivoting the data into a long format for analysis below
+  pivot_longer(cols = starts_with("rel"),
+               names_to = "method", # Method is the name of the metric-sets
+               values_to = "score")
+
+# Analysis comparing the top results
+rank.method.compare.tops <- rank.method.compare %>% 
+  # within each Rank.Set, select the top scoring Source (Model) per method (metric-set)
+  group_by(sys.meth.set, method) %>% 
+  filter(score == min(score)) %>%  # filters to the top scoring per metric set
+  # creating a count of the source per Rank.Set within the top scorers
+  group_by(sys.meth.set, source) %>% 
+  mutate(source.pair = n()) %>% 
+  # within each Rank.Set, identifying "outliers"
+  # outliers are defined here as not being the most arrived at source (model)
+  group_by(sys.meth.set) %>% 
+  mutate(outlier = ifelse(source.pair == max(source.pair), FALSE, TRUE))
+# in this case, if each method had selected a different source, then none would 
+# be flagged as an outlier because all would be == 1 which would be the max in 
+# that scenario
+
+# creating a ranked order of rel.sums (method) for plotting reasons 
+rel.method <- unique(rank.method.compare.tops$method[order(rank.method.compare.tops$method)])
+rank.method.compare.tops$method <- factor(rank.method.compare.tops$method, levels = rel.method)
+# if they are ranked, then they will plot in order in each of the stacked bar
+# plots that are below
+
+# First Stacked Bar shows by each source that was selected
+# is there a trend in which different source selected?
+rank.method.compare.tops %>% 
+  ggplot(aes(x = sys.meth.set,
+              colour = method,
+             fill = source)) +
+  geom_bar(stat = "count") +
+  coord_flip()
+
+# Second stacked Bar highlights which method had outliers (or not)
+rank.method.compare.tops %>% 
+  ggplot(aes(x = sys.meth.set,
+              colour = method,
+             fill = outlier)) +
+  geom_bar(stat = "count") +
+  coord_flip()
+
+# Calculating the proportion of outlying source selections each method produced
+rank.method.compare.tops %>% 
+  ungroup() %>% 
+  count(method, outlier) %>% 
+  group_by(method) %>% 
+  mutate(pr.outlier = n / sum(n)) %>% 
+  filter(outlier == FALSE) %>% 
+  arrange(desc(pr.outlier))
+
+# rel.Sum had the fewest number of outliers
+# rel.sumMASE was second place
+```
+
+Selecting rel.sum, which uses abs.MPE, MAPE, RMSE, and r.cor
+
+## Save Top Model Results
+```{r}
+rank.top.results <- rank.combined %>% 
+  # for each rank.set
+  group_by(sys.meth.set) %>% 
+  # select the top ranked (lowest value) source (model)
+  filter(rel.sum == min(rel.sum),
+         rank.set != "04.5_Specialized_General") %>% 
+  rename(top.model = source) %>% 
+  mutate(is.n.robust = no.estimates >= 20,
+         is.n.special.robust = no.estimates >= 10,
+         is.cv.robust = mean.CV <= 50,
+         is.special = special.level == rank.set.level,
+         keep = case_when(
+           is.n.robust == TRUE & is.cv.robust == TRUE ~ TRUE,
+           is.n.special.robust == TRUE & is.cv.robust == TRUE & is.special == TRUE ~ TRUE,
+           TRUE ~ FALSE
+         ))
+
+saveRDS(rank.top.results, file = "./r_objects/02_01_rank_top_results.rds")
+
+rank.selected <- rank.top.results %>% 
+  filter(keep == TRUE)
+```
+
+### Summary Plots
+Just plotting top 5 models in each rank set to reduce the number of colours
+```{r}
+rank.combined <- rank.combined %>% 
+  group_by(sys.meth.set) %>% 
+  mutate(rank = rank(rel.sum))
+
+rank.combined.reduced <- rank.combined %>% 
+  filter(rank <= 5) %>% 
+  ungroup()
+```
+
+
+Colourblind safe colours
+https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+```{r}
+col.mods<-arrange(count(rank.combined.reduced, source), desc(n))
+
+print(col.mods, n = 30)
+
+col.mods$col = NA
+
+col.mods$col = c("#DDCC77", "#CC6677", "black", "#888888", # 4
+                 "#88CCEE", "#117733", "#332288", "#661100", # 8
+                 "#44AA99", "#999933", "#882255","#AA4499",  # 12
+                 "#DDCC10", "#CC6610", "#6699CC", "grey25", # 16
+                 "#999975", "#332200", "#44AA50", "red", # 20
+                 "grey") # 21
+
+col.mods <- arrange(col.mods, source)
+```
+
+
+```{r}
+# making a reference for looping and filtering within the loop
+mod.ranks <- left_join(mod.ranks,
+                       dplyr::select(cal, usid, size))
+
+# making a list of rank sets to loop through to make figures for
+sys.meth.set <- rank.combined.reduced %>% 
+  dplyr::select(no.estimates, sys.meth.set:special.level) %>% 
+  unique()
+
+for(i in 1:nrow(sys.meth.set)){
+  
+  loop.dat <- rank.combined.reduced[rank.combined.reduced$sys.meth.set == as.character(sys.meth.set$sys.meth.set[i]), ]
+  loop.river <- sys.meth.set$rank.filter[i] # loop.river = river or aggregate level
+  loop.set <- sys.meth.set$rank.set[i] # loop model/rank set that is being plotted
+  loop.method <- sys.meth.set$rank.method[i] # loop method
+  loop.source <- loop.dat$source[loop.dat$rel.sum == min(loop.dat$rel.sum)] # top model source
+  loop.sp.level <- sys.meth.set$special.level[i] # rank set special level, for later filtering step
+  loop.cols <- col.mods$col[col.mods$source %in% loop.dat$source] # colours for plotting
+  loop.keep <- ifelse(rank.top.results$keep[rank.top.results$sys.meth.set == as.character(sys.meth.set$sys.meth.set[i])] == TRUE,
+                      " - Accepted", " - Rejected")
+  
+  # Paired down data to the model set data and top model fits
+  loop.dat.top <- filter(mod.ranks,
+                         lpe_method == loop.method, # filter down to method
+                         source == loop.source) # filter to top model
+  # need to further filter based on the aggregate, size, size.clarity, river or special set
+  if(loop.sp.level == 2) loop.dat.top <- filter(loop.dat.top,
+                                                agg.size == loop.river)
+  if(loop.sp.level == 3) loop.dat.top <- filter(loop.dat.top,
+                                                size == loop.river)
+  if(loop.sp.level == 4) loop.dat.top <- filter(loop.dat.top,
+                                                size.clarity == loop.river)
+  if(loop.sp.level >= 5) loop.dat.top <- filter(loop.dat.top, # individual rivers
+                                                gazetted_stream_name == loop.river)
+  if(loop.sp.level == 4.5) { # 5 are the partial aggregate special sets.
+    loop.usid <- mod.ranks %>% filter(source == loop.river)
+    loop.dat.top <- filter(loop.dat.top, usid %in% loop.usid$usid)
+  }
+      
+  # Relative Rank Sum
+  pl1 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, rel.sum,
+                                sys.meth.set, median), 
+             y = rel.sum, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    ylim(c(0,1)) +
+    labs(x = "", y = "Average \n Relative Model Rank \n (1=Worst, 0=Best)")
+  
+  # Mean Percent Error
+  pl2 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, abs.mean.percent.error,
+                                sys.meth.set, median), 
+             y = mean.percent.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0.15, col = "grey") +
+    geom_hline(yintercept = -0.15, col = "grey") +
+    geom_hline(yintercept = 0.50, col = "black") +
+    geom_hline(yintercept = -0.50, col = "black") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    geom_hline(yintercept = 0) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Mean Percent \n Error (MPE)")
+  
+  # Mean Absolute Percent Error
+  pl3 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, mean.abs.per.error,
+                                sys.meth.set, median), 
+             y = mean.abs.per.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_hline(yintercept = 0.15, col = "grey") +
+    geom_hline(yintercept = 0.50, col = "black") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Mean Absolute Percent \n Error (MAPE)")
+  
+  # Root mean squared error
+  pl4 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, root.mean.sqrd.error,
+                                sys.meth.set, median), 
+             y = root.mean.sqrd.error, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Root Mean Squared \n Error (RMSE)")
+
+  # R correlation coefficient
+  pl6 <- ggplot(loop.dat,
+         aes(x = reorder_within(source, -r.correlation,
+                                sys.meth.set, median), 
+             y = r.correlation, fill = source)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_x_reordered() +
+    geom_hline(yintercept = 0.80, col = "grey") +
+    geom_hline(yintercept = 1, col = "black") +
+    scale_fill_manual(values = loop.cols) +
+    theme(axis.text.x = element_blank()) +
+    labs(x = "", y = "Correlation Coefficient \n (R)")
+  
+  # LPE vs. HAE and Fit graph
+  pl7 <- ggplot(loop.dat.top,
+                aes(x = classic/1.8, y = hpe)) +
+    geom_point(alpha = 0.75) +
+    geom_point(aes(y = calibrated.estimate), colour = "red", alpha = 0.60) +
+    scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+    theme(axis.text.y = element_text(angle = 90, hjust = 0.5, vjust = 1),
+          panel.grid.major = element_line(colour = "grey")) +
+    #geom_vline(xintercept = 75000, alpha = 0.25, lty = 2) +
+    labs(x = "Low Precision Estimate (LPE)",
+         y = "High Accuracy Estimate \n (HAE-black) \n & Top Model Fit (Red)",
+         title = paste0(loop.source, loop.keep))
+  
+  # combining the plots using patchwork
+  (pl2 | pl3) / (pl4 | pl6) / (pl1) +
+    plot_annotation(paste0("Model Performance Results for \n ", sys.meth.set$sys.meth.set[i], 
+                                                   " Set [", sys.meth.set$no.estimates[i], "]"),
+                    theme=theme(plot.title=element_text(hjust=0.5))) +
+    plot_layout(heights = c(1,1,1),
+                guides = 'collect') & 
+      theme(legend.position = 'top') &
+    guides(fill = guide_legend(nrow = 3))
+  
+  ggsave(paste0("./figures/02_Rank_Summaries/", 
+                sys.meth.set$sys.meth.set[i], ".png"),
+         height = 7.2, width = 8, dpi = 150)
+  
+}
+
+```
+
+```{r}
+
+```
+

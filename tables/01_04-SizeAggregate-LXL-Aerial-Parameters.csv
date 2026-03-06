@@ -1,0 +1,5 @@
+"parameter","Estimate","std.error","cross.zero"
+"(Intercept)",12.13,0.27,"No"
+"lnlpe.sc",1.35,0.62,"No"
+"lnlpe.sc:sizeX-Large",-0.66,0.63,"No"
+"sizeX-Large",-0.5,0.28,"No"
