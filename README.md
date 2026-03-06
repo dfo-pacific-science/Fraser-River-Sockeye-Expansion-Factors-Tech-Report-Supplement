@@ -4,7 +4,7 @@ This repository accompanies the Canadian Technical Report:
 
 
 
-Arbeider, M … 2025. Assessment and redevelopment of visual survey expansion factors and a summary of current interpolation methods for estimating Fraser River Sockeye (Oncorhynchus nerka) spawner estimates. Can. Tech. Rep. Fish. Aquat. Sci. xxxx: v + XX p.
+Arbeider, M … 2026. Assessment and redevelopment of visual survey expansion factors and a summary of current interpolation methods for estimating Fraser River Sockeye (*Oncorhynchus nerka*) spawner estimates. Can. Tech. Rep. Fish. Aquat. Sci. xxxx: v + XX p.
 
 
 
